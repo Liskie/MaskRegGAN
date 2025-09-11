@@ -9,7 +9,7 @@ import torch
 from .utils import LambdaLR,Logger,ReplayBuffer
 from .utils import weights_init_normal,get_config
 from .datasets import ImageDataset,ValDataset
-from Model.CycleGan import *
+from models.CycleGan import *
 from .utils import Resize,ToTensor,smooothing_loss
 from .utils import Logger
 from .reg import Reg

@@ -1,0 +1,30 @@
+#####
+name: CycleGan
+bidirect: False #Unidirectional or bidirectional
+regist: True    # With or without registration network
+noise_level: 0  #  noise level
+port: 6019   #  port parameters
+save_root: './output/SynthRAD_CycleGAN_noise0/NC+R/'
+image_save: './output/SynthRAD_CycleGAN_noise0/NC+R/img/'
+
+# lamda weight
+Adv_lamda: 1
+Cyc_lamda: 10
+Corr_lamda: 20
+Smooth_lamda: 10
+
+
+epoch: 0        # starting epoch
+n_epochs: 80       # How often do you want to display output images during training
+batchSize: 1               # size of the batches
+dataroot: 'data/SynthRAD2023-Task1/train2D'     # root directory of the dataset
+val_dataroot: 'data/SynthRAD2023-Task1/test2D/'
+lr: 0.0001                   # initial learning rate
+decay_epoch: 20            # epoch to start linearly decaying the learning rate to 0
+size: 256                # size of the data crop
+input_nc: 1         
+output_nc: 1                  
+cuda: True                
+n_cpu: 32
+val_freq: 10 # How often to run validation
+

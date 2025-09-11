@@ -9,6 +9,7 @@ from torch.distributions.normal import Normal
 import torch.nn.functional as F
 # local
 from .layers import DownBlock, Conv, ResnetTransformer
+
 sampling_align_corners = False
 
 # The number of filters in each block of the encoding part (down-sampling).
@@ -73,6 +74,7 @@ class ResUnet(torch.nn.Module):
         self.output = Conv(in_nf, 2, 3, 1, 1, use_resnet=False, bias=True,
                            init_func=('zeros' if init_to_identity else init_func), activation=None,
                            use_norm=False)
+
     def forward(self, img_a, img_b):
         x = torch.cat([img_a, img_b], 1)
         skip_vals = {}
@@ -98,11 +100,12 @@ class ResUnet(torch.nn.Module):
         x = self.output(x)
         return x
 
+
 class Reg(nn.Module):
-    def __init__(self,height,width，in_channels_a,in_channels_b):
+    def __init__(self, height, width, in_channels_a, in_channels_b):
         super(Reg, self).__init__()
-       #height,width=256,256
-        #in_channels_a,in_channels_b=1,1
+        # height,width=256,256
+        # in_channels_a,in_channels_b=1,1
         init_func = 'kaiming'
         init_to_identity = True
 
@@ -112,7 +115,8 @@ class Reg(nn.Module):
         self.in_channels_a = in_channels_a
         self.in_channels_b = in_channels_b
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.offset_map = ResUnet(self.in_channels_a, self.in_channels_b, cfg='A', init_func=init_func, init_to_identity=init_to_identity).to(
+        self.offset_map = ResUnet(self.in_channels_a, self.in_channels_b, cfg='A', init_func=init_func,
+                                  init_to_identity=init_to_identity).to(
             self.device)
         self.identity_grid = self.get_identity_grid()
 
@@ -126,7 +130,6 @@ class Reg(nn.Module):
         return identity
 
     def forward(self, img_a, img_b, apply_on=None):
-
         deformations = self.offset_map(img_a, img_b)
 
         return deformations

@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torch.autograd import Variable
 import os
 from .datasets import ImageDataset,ValDataset
-from Model.NiceGan import *
+from models.NiceGan import *
 from .utils import Resize,ToTensor,smooothing_loss
 from .utils import Logger
 from .reg import Reg
