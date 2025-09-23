@@ -1,66 +1,96 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
 
-if __name__ == '__main__':
-       mat = np.array([[1, 2, 3, 4, 5],
-                       [6, 7, 8, 9, 10],
-                       [11, 12, 13, 14, 15],
-                       [16, 17, 18, 19, 20],
-                       [21, 22, 23, 24, 25]])
 
-       x = np.array([0, 0, 1, 1, 1, 3, 3, 4])
-       y = np.array([0, 1, 0, 3, 4, 1, 4, 0])
+class ResizeKeepRatioPad:
+    """Replica of training keepratio resize: aspect-preserving resize + padding."""
 
-       print(mat[x, y])
-       print(mat[x][y])
+    def __init__(self, size_tuple=(256, 256), fill=-1):
+        self.target_h, self.target_w = size_tuple
+        self.fill = float(fill)
 
-       """
-       这里用的是 高级成对索引 (advanced indexing with two arrays)。
-规则是：把 x[i], y[i] 成对使用，取出每一个坐标对应的元素。
-	•	(0,0) → 1
-	•	(0,1) → 2
-	•	(1,0) → 6
-	•	(1,3) → 9
-	•	(1,4) → 10
-	•	(3,1) → 17
-	•	(3,4) → 20
-	•	(4,0) → 21
-	所以输出就是：[ 1  2  6  9 10 17 20 21]
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        if isinstance(img, np.ndarray):
+            img = torch.from_numpy(img)
+        if img.ndim == 2:
+            img = img.unsqueeze(0)
+        if img.ndim != 3:
+            raise ValueError(f"Expected (C,H,W), got shape={tuple(img.shape)}")
+        if not img.is_floating_point():
+            img = img.float()
 
-    
-    这是 两次索引，不是成对索引：
-	1.	mat[x]：先从 mat 里取出 x 指定的行。
-	•	x = [0,0,1,1,1,3,3,4]
-	•	于是得到一个数组，形状是 (8,5)，每行都是 mat 的一行。
-	•	前两行是 mat[0] = [1,2,3,4,5]，接下来三行是 mat[1]，再两行 mat[3]，最后一行 mat[4]。
-得到：
-[[ 1  2  3  4  5]
- [ 1  2  3  4  5]
- [ 6  7  8  9 10]
- [ 6  7  8  9 10]
- [ 6  7  8  9 10]
- [16 17 18 19 20]
- [16 17 18 19 20]
- [21 22 23 24 25]]
- 
- 2.	[y]：再在这个结果上取行，y = [0,1,0,3,4,1,4,0]。
-	•	比如索引 0 行 → [1,2,3,4,5]
-	•	索引 1 行 → [1,2,3,4,5]
-	•	索引 3 行 → [6,7,8,9,10]
-	•	…以此类推。
+        c, h, w = img.shape
+        scale = min(self.target_h / max(h, 1), self.target_w / max(w, 1))
+        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, int(round(w * scale)))
 
-结果就是一个 (8,5) 的二维数组：
+        resized = F.interpolate(img.unsqueeze(0), size=(new_h, new_w), mode="bilinear", align_corners=False)
+        resized = resized.squeeze(0)
 
-[[ 1  2  3  4  5]
- [ 1  2  3  4  5]
- [ 1  2  3  4  5]
- [ 6  7  8  9 10]
- [ 6  7  8  9 10]
- [ 1  2  3  4  5]
- [ 6  7  8  9 10]
- [ 1  2  3  4  5]]
- 
- 📌 总结
-	•	mat[x, y] → 成对索引，取出若干具体坐标上的单个元素 → 1D array。
-	•	mat[x][y] → 先选行，再从这个子数组里选行 → 得到一堆整行 → 2D array。
+        pad_h = self.target_h - new_h
+        pad_w = self.target_w - new_w
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
 
-       """
+        return F.pad(resized, (pad_left, pad_right, pad_top, pad_bottom), value=self.fill)
+
+
+INPUT_PATH = Path("tmp/1PA177.nii_z0007.npy")
+KEEP_RATIO_SIZE = (512, 512)  # Matches training keepratio resize target (H, W)
+ORIGINAL_BG_OUT = INPUT_PATH.with_name(f"{INPUT_PATH.stem}_background.png")
+KEEP_RATIO_BG_OUT = INPUT_PATH.with_name(
+    f"{INPUT_PATH.stem}_background_keepratio{KEEP_RATIO_SIZE[0]}.png"
+)
+BACKGROUND_SENTINEL = -1.0
+EPSILON = 1e-3  # accommodate minor interpolation drift around the sentinel
+
+
+def extract_background_mask(array: np.ndarray) -> np.ndarray:
+    mask = np.isclose(array, BACKGROUND_SENTINEL, atol=EPSILON)
+    if not mask.any():
+        mask = array <= (BACKGROUND_SENTINEL + EPSILON)
+    return mask
+
+
+def mask_to_image(mask: np.ndarray) -> np.ndarray:
+    return np.where(mask, 0, 255).astype(np.uint8)
+
+
+def save_mask_image(mask: np.ndarray, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(mask).save(path)
+
+
+def apply_keep_ratio_resize(array: np.ndarray) -> np.ndarray:
+    tensor = torch.from_numpy(array.astype(np.float32)).unsqueeze(0)
+    resized = ResizeKeepRatioPad(size_tuple=KEEP_RATIO_SIZE, fill=BACKGROUND_SENTINEL)(tensor)
+    return resized.squeeze(0).detach().cpu().numpy()
+
+
+def main() -> None:
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(f"Input file not found: {INPUT_PATH}")
+
+    original = np.load(INPUT_PATH).astype(np.float32)
+
+    original_mask = extract_background_mask(original)
+    save_mask_image(mask_to_image(original_mask), ORIGINAL_BG_OUT)
+
+    resized = apply_keep_ratio_resize(original)
+    resized_mask = extract_background_mask(resized)
+    save_mask_image(mask_to_image(resized_mask), KEEP_RATIO_BG_OUT)
+
+    print(f"Saved original-size background mask to: {ORIGINAL_BG_OUT}")
+    print(f"Saved keepratio background mask to: {KEEP_RATIO_BG_OUT}")
+
+
+if __name__ == "__main__":
+    main()

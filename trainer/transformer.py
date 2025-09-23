@@ -29,6 +29,3 @@ class Transformer_2D(nn.Module):
         warped = F.grid_sample(src,new_locs,align_corners=True,padding_mode="border")
         # ctx.save_for_backward(src,flow)
         return warped
-
-
-

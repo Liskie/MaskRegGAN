@@ -51,9 +51,11 @@ from skimage.measure import label, regionprops
 from trainer.utils import plot_composite
 
 
-def _resize_keepratio_pad(img: np.ndarray, size: int = 512, fill: float = -1.0) -> np.ndarray:
-    """Resize img to fit into size×size keeping aspect ratio, then pad with `fill`.
-    Expects grayscale 2D array. Returns float32.
+def _resize_to(img: np.ndarray, size: int = 512, mode: str = 'keepratio', fill: float = -1.0) -> np.ndarray:
+    """Resize to a square canvas of side `size`.
+    mode='resize'  : direct resize to (size,size) ignoring aspect ratio.
+    mode='keepratio': keep aspect ratio and center-pad with `fill`.
+    Expects grayscale 2D; returns float32 in input range.
     """
     img = np.asarray(img)
     if img.ndim != 2:
@@ -61,19 +63,21 @@ def _resize_keepratio_pad(img: np.ndarray, size: int = 512, fill: float = -1.0) 
     h, w = img.shape[:2]
     if h == size and w == size:
         return img.astype(np.float32)
-    # scale
+    if mode == 'resize':
+        resized = cv2.resize(img, (size, size), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        return resized
+    # default: keepratio + pad
     scale = min(size / float(h), size / float(w))
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
     interp = cv2.INTER_LINEAR
     resized = cv2.resize(img, (new_w, new_h), interpolation=interp).astype(np.float32)
-    # pad to center
     pad_top = (size - new_h) // 2
     pad_bottom = size - new_h - pad_top
     pad_left = (size - new_w) // 2
     pad_right = size - new_w - pad_left
     out = np.full((size, size), fill, dtype=np.float32)
-    out[pad_top:pad_top+new_h, pad_left:pad_left+new_w] = resized
+    out[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized
     return out
 
 def _scan_val_pairs(val_root: str):
@@ -151,7 +155,9 @@ def _filter_pairs_by_metrics_csv(pairs, metrics_csv: str, psnr_min: float) -> Li
 def inject_eval_from_val(val_root: str, anno_dir: str, ypred_dir: str, out_dir: str,
                          num_pairs: int = 100, seed: int = 42, alpha: float = 1.0,
                          rd_cfg: Dict = None, metrics_csv: str = None, psnr_min: float = 28.0,
-                         progress: Progress = None, task_id: int = None, draw: bool = True):
+                         progress: Progress = None, task_id: int = None, draw: bool = True,
+                         size: int = 512, resize_mode: str = 'keepratio', fill: float = -1.0,
+                         anno_canvas: int = 512):
     random.seed(seed);
     np.random.seed(seed)
     os.makedirs(out_dir, exist_ok=True)
@@ -229,9 +235,9 @@ def inject_eval_from_val(val_root: str, anno_dir: str, ypred_dir: str, out_dir: 
                 except Exception:
                     pass
             continue
-        # Ensure same canvas (keepratio to 512, pad with -1)
-        y_true = _resize_keepratio_pad(y_true, size=512, fill=-1.0)
-        y_pred = _resize_keepratio_pad(y_pred, size=512, fill=-1.0)
+        # Ensure same canvas according to configured size/mode
+        y_true = _resize_to(y_true, size=size, mode=resize_mode, fill=fill)
+        y_pred = _resize_to(y_pred, size=size, mode=resize_mode, fill=fill)
         # pick annotation
         adata = np.load(random.choice(anno_files), allow_pickle=True)
         patches = adata['patches'];
@@ -246,6 +252,10 @@ def inject_eval_from_val(val_root: str, anno_dir: str, ypred_dir: str, out_dir: 
         else:
             h, w = mask_crop.shape;
             bbox = (0, 0, h - 1, w - 1)
+        # Map annotations (e.g., on 512×512) to current size, then align bbox to patch & canvas
+        patch, mask_crop, bbox = _maybe_rescale_patch_and_bbox(patch, mask_crop, bbox, anno_canvas, size)
+        Hc, Wc = y_true.shape
+        bbox = _fix_bbox_for_patch(patch, bbox, Hc, Wc)
 
         y_inj, mask_true = _inject_region(y_true, patch, mask_crop, bbox, alpha=alpha)
         mask_pred, rd_data = _extract_mask_from_residual(gt=y_inj, pred=y_pred, cfg=rd_defaults)
@@ -602,6 +612,52 @@ def _random_affine(H: int, W: int, angle_deg=15.0, scale_min=0.9, scale_max=1.1,
     M[:, 2] += [tx, ty]
     return M
 
+# --- Helper: scale bbox defined on a square annotation canvas ---
+def _scale_bbox_square(bbox: Tuple[int,int,int,int], s: float) -> Tuple[int,int,int,int]:
+    y0, x0, y1, x1 = map(float, bbox)
+    y0 *= s; x0 *= s; y1 *= s; x1 *= s
+    return int(round(y0)), int(round(x0)), int(round(y1)), int(round(x1))
+
+# --- Helper: optionally rescale patch/mask and bbox from annotation canvas to current size ---
+def _maybe_rescale_patch_and_bbox(patch: np.ndarray, mask_crop: np.ndarray, bbox: Tuple[int,int,int,int],
+                                  anno_canvas: int, size: int) -> Tuple[np.ndarray, np.ndarray, Tuple[int,int,int,int]]:
+    """If annotations were made on a square canvas (e.g., 512x512) and current size differs,
+    uniformly rescale patch/mask and bbox by s=size/anno_canvas.
+    """
+    if int(anno_canvas) <= 0 or int(anno_canvas) == int(size):
+        return patch, mask_crop, bbox
+    s = float(size) / float(anno_canvas)
+    ph, pw = patch.shape[:2]
+    new_w = max(1, int(round(pw * s)))
+    new_h = max(1, int(round(ph * s)))
+    patch2 = cv2.resize(patch, (new_w, new_h), interpolation=cv2.INTER_LINEAR).astype(patch.dtype)
+    mask2 = cv2.resize(mask_crop.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
+    bbox2 = _scale_bbox_square(bbox, s)
+    return patch2, mask2, bbox2
+
+# --- Helper: ensure bbox matches patch size and stays within current canvas ---
+def _fix_bbox_for_patch(patch: np.ndarray, bbox: Tuple[int, int, int, int], H: int, W: int) -> Tuple[int, int, int, int]:
+    """Ensure bbox size matches the patch shape and fits within (H,W).
+    Keeps the top-left (y0,x0) from the provided bbox (clamped into canvas),
+    then sets (y1,x1) to y0+ph-1, x0+pw-1, with clipping if needed.
+    """
+    ph, pw = map(int, patch.shape[:2])
+    y0, x0, y1, x1 = map(int, bbox)
+    # Clamp top-left inside canvas
+    y0 = max(0, min(y0, max(0, H - 1)))
+    x0 = max(0, min(x0, max(0, W - 1)))
+    # Compute bottom-right based on patch size
+    y1 = y0 + ph - 1
+    x1 = x0 + pw - 1
+    # If overflow, shift back so the patch fits
+    if y1 >= H:
+        y0 = max(0, H - ph)
+        y1 = y0 + ph - 1
+    if x1 >= W:
+        x0 = max(0, W - pw)
+        x1 = x0 + pw - 1
+    return int(y0), int(x0), int(y1), int(x1)
+
 
 def _inject_region(y_true: np.ndarray, patch: np.ndarray, mask_crop: np.ndarray, bbox: Tuple[int, int, int, int],
                    alpha: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
@@ -792,6 +848,11 @@ if __name__ == '__main__':
     p2.add_argument('--rd_min_highz_pixels', type=int, default=2)
     p2.add_argument('--psnr_min', type=float, default=28.0, help='Minimum PSNR to keep a slice (used with --metrics_csv)')
     p2.add_argument('--no_draw', action='store_true', default=False, help='Do not draw and save overlay/composite images')
+    p2.add_argument('--size', type=int, default=512, help='Final square canvas size for x/gt/pred')
+    p2.add_argument('--resize_mode', type=str, default='keepratio', choices=['resize','keepratio'],
+                   help='resize: force to size×size (ignore aspect); keepratio: keep aspect and pad')
+    p2.add_argument('--fill', type=float, default=-1.0, help='Pad value when resize_mode=keepratio')
+    p2.add_argument('--anno_canvas', type=int, default=512, help='Square canvas size used during annotation (e.g., 512)')
 
     p3 = sub.add_parser('plot_hist', help='Plot IoU/Dice histograms from a metrics.csv')
     p3.add_argument('--csv', type=str, required=True)
@@ -829,6 +890,10 @@ if __name__ == '__main__':
     p4.add_argument('--rd_allow_empty', type=str, nargs='+', default=['true'], help='true/false values')
     p4.add_argument('--rd_th_seed_hi', type=float, nargs='+', default=[0.0])
     p4.add_argument('--rd_min_highz_pixels', type=int, nargs='+', default=[2])
+    p4.add_argument('--size', type=int, default=512)
+    p4.add_argument('--resize_mode', type=str, default='keepratio', choices=['resize','keepratio'])
+    p4.add_argument('--fill', type=float, default=-1.0)
+    p4.add_argument('--anno_canvas', type=int, default=512)
 
     args2 = ap2.parse_args()
     if args2.cmd == 'inject_eval_from_val':
@@ -855,7 +920,8 @@ if __name__ == '__main__':
         inject_eval_from_val(args2.val_root, args2.anno_dir, args2.ypred_dir, args2.out_dir,
                              num_pairs=args2.num_pairs, seed=args2.seed, alpha=args2.alpha,
                              rd_cfg=rd_cfg, metrics_csv=args2.metrics_csv, psnr_min=args2.psnr_min,
-                             draw=draw)
+                             draw=draw, size=args2.size, resize_mode=args2.resize_mode, fill=args2.fill,
+                             anno_canvas=args2.anno_canvas)
     elif args2.cmd == 'plot_hist':
         plot_histograms(args2.csv, args2.out_dir, bins=args2.bins)
     elif args2.cmd == 'tune_rd':
@@ -904,7 +970,9 @@ if __name__ == '__main__':
                     inject_eval_from_val(args2.val_root, args2.anno_dir, args2.ypred_dir, subdir,
                                          num_pairs=args2.num_pairs, seed=args2.seed, alpha=args2.alpha,
                                          rd_cfg=rd_cfg, metrics_csv=args2.metrics_csv, psnr_min=args2.psnr_min,
-                                         progress=prog, task_id=task_one, draw=(not args2.no_draw))
+                                         progress=prog, task_id=task_one, draw=(not args2.no_draw),
+                                         size=args2.size, resize_mode=args2.resize_mode, fill=args2.fill,
+                                         anno_canvas=args2.anno_canvas)
                     # Read back average row
                     mcsv = os.path.join(subdir, 'metrics.csv')
                     avg_iou = avg_dice = None
@@ -975,6 +1043,7 @@ python experiment02-unregable-area.py inject_eval_from_val \
   --out_dir   experiment-results/02-unregable-area \
   --psnr_min  28 \
   --num_pairs 1000 --alpha 1.0 --seed 0
+  --size 512 --resize_mode keepratio --anno_canvas 512
   
 python experiment02-unregable-area.py plot_hist \
   --csv experiment-results/02-unregable-area/metrics.csv \
@@ -993,7 +1062,8 @@ python experiment02-unregable-area.py tune_rd \
   --rd_Tl 1.2 1.5 1.8 \
   --rd_fdr_q 0.05 0.10 \
   --rd_th_seed_hi 0 2.5 \
-  --rd_min_highz_pixels 2 5
+  --rd_min_highz_pixels 2 5 \
+  --size 512 --resize_mode keepratio --anno_canvas 512
   
 python experiment02-unregable-area.py tune_rd \
   --val_root  data/SynthRAD2023-Task1/test2D/ \
@@ -1005,5 +1075,21 @@ python experiment02-unregable-area.py tune_rd \
   --rd_Tl 1.6 1.7 1.8 1.9 2.0 \
   --rd_fdr_q 0.03 0.05 0.08 \
   --rd_th_seed_hi 0 \
-  --rd_min_highz_pixels 2
+  --rd_min_highz_pixels 2 \
+  --size 512 --resize_mode keepratio --anno_canvas 512
+  
+python experiment02-unregable-area.py tune_rd \
+  --val_root  data/SynthRAD2023-Task1/test2D/ \
+  --anno_dir  data/SynthRAD2023-Task1/test2D/anno \
+  --ypred_dir output/SynthRAD_CycleGAN_noise0_bigbatch/NC+R/img-residual/pred \
+  --metrics_csv output/SynthRAD_CycleGAN_noise0_bigbatch/NC+R/img-residual/metrics.csv \
+  --out_dir   experiment-results/02-unregable-area/tune_256_resize \
+  --size 256 --resize_mode resize \
+  --psnr_min  27 \
+  --no_draw \
+  --num_pairs 1000 --alpha 1.0 --seed 42 \
+  --rd_Tl 1.2 1.5 1.8 \
+  --rd_fdr_q 0.05 0.10 \
+  --rd_th_seed_hi 0 2.5 \
+  --rd_min_highz_pixels 2 5
 """

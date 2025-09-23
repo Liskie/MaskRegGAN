@@ -1,19 +1,24 @@
 #####
 name: CycleGan
-bidirect: False #Unidirectional or bidirectional
+bidirect: False # Unidirectional or bidirectional
 regist: True    # With or without registration network
 noise_level: 0  #  noise level
 port: 6019   #  port parameters
-save_root: './output/SynthRAD_CycleGAN_noise0_bigbatch_keepratio_512/NC+R/'
-#image_save: './output/SynthRAD_CycleGAN_noise0_bigbatch_keepratio_512/NC+R/img/'
-image_save: './output/SynthRAD_CycleGAN_noise0_bigbatch_keepratio_512/NC+R/img-foreground-test-with-mask/'
+save_root: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/'
+#save_root: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-masked-dist/NC+R/'
+image_save: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/' # with-mask test
+#image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/' # no-mask test
+
+wandb_project: RegGAN
+wandb_run_name: RegGAN-masked
+wandb_tags: ['SynthRAD2023', '512', 'bestparams', 'keepratio', 'reg-masked', 'foreground-only']
+#wandb_notes: ''
 
 # lamda weight
 Adv_lamda: 1
 Cyc_lamda: 10
 Corr_lamda: 20
 Smooth_lamda: 10
-
 
 epoch: 0        # starting epoch
 n_epochs: 80       # How often do you want to display output images during training
@@ -23,18 +28,20 @@ val_dataroot: 'data/SynthRAD2023-Task1/test2D-foreground/'
 lr: 0.0001                   # initial learning rate
 decay_epoch: 20            # epoch to start linearly decaying the learning rate to 0
 size: 512                # size of the data crop
-input_nc: 1         
-output_nc: 1                  
+input_nc: 1
+output_nc: 1
 cuda: True
 save_every_n_epochs: 5
 
-n_cpu: 4
+n_cpu: 4                 # 或者 8~12，视CPU核数而定；单卡训练通常 4~12 都OK
 dataloader_timeout: 30
 persistent_workers: true
 prefetch_factor: 2
-cache_mode: none # 'none', 'mmap', 'ram'
+cache_mode: mmap # 'none', 'mmap', 'ram'
 
 val_freq: 5 # How often to run validation
+val_track_enable: true        # 开关
+val_track_fixed_n: 50         # 固定追踪的样本数（默认 50）
 
 resize_mode: keepratio  #keepratio or resize
 eval_with_registration: true
@@ -45,7 +52,8 @@ mc_runs: 1                # 次数，默认 1（关闭MC）
 mc_mode: input_noise           # 'dropout' 或 'input_noise'
 mc_input_noise_sigma: 0.02 # 仅当 mc_mode='input_noise' 时生效；噪声在 [-1,1] 空间
 
-residual_detect: false
+# === Test-time Residual Detection ===
+residual_detect: true
 rd_fdr_q: 0.05              # **从 0.10 改为 0.05**
 rd_Tl: 1.8                  # **从 1.5 改为 1.8**
 rd_seed_smooth_sigma: 1.0
@@ -64,16 +72,15 @@ rd_allow_empty: true
 rd_th_seed_hi: 0
 rd_min_highz_pixels: 2
 
-
 # === Residual detect usage ===
 # rd_mode: none / mask / weights
 rd_mode: mask
-rd_mask_dir: "output/SynthRAD_CycleGAN_noise0_bigbatch_keepratio_512/NC+R/img-residual-bestparams/rd_masks"
-#rd_weights_dir: ""
+rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-test-without-mask/rd_masks'
+#rd_weights_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/rd_weights'
 rd_w_min: 0.0
+
 rd_scan_on_init: false
 
-metrics_use_rd: true
-
-
-test_metrics_use_rd: true
+# 测试阶段是否用 RD 掩膜忽略不对齐区域
+metrics_use_rd: false
+test_metrics_use_rd: false
