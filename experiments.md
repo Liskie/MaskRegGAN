@@ -37,7 +37,7 @@ CUDA_VISIBLE_DEVICES=0 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN
 CUDA_VISIBLE_DEVICES=2 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch.yaml'
 CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch-keepratio.yaml'
 CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch-keepratio-bestparams.yaml'
-CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-dist.yaml'
+CUDA_VISIBLE_DEVICES=2 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-dist.yaml'
 CUDA_VISIBLE_DEVICES=3 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-masked-dist.yaml'
 ```
 

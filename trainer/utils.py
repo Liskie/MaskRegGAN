@@ -242,8 +242,8 @@ class ResizeKeepRatioPad:
         new_w = max(1, int(round(W * scale)))
 
         # Resize with bilinear (for 2D)
-        img_resized = F.interpolate(img.unsqueeze(0), size=(new_h, new_w), mode='bilinear',
-                                    align_corners=False).squeeze(0)
+        # img_resized = F.interpolate(img.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
+        img_resized = F.interpolate(img.unsqueeze(0), size=(new_h, new_w), mode='nearest').squeeze(0)
 
         # Compute symmetric padding
         pad_h = self.target_h - new_h

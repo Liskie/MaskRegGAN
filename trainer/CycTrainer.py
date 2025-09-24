@@ -9,6 +9,7 @@ import time
 import copy
 import json
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 
 from torchvision.transforms import RandomAffine, ToPILImage
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
@@ -218,6 +219,18 @@ class Cyc_Trainer():
         # Defaults to metrics_use_rd if unspecified
         self.metrics_use_rd = bool(config.get('metrics_use_rd', False)) if not hasattr(self, 'metrics_use_rd') else self.metrics_use_rd
         self.val_metrics_use_rd = bool(config.get('val_metrics_use_rd', config.get('metrics_use_rd', False)))
+        self.val_save_keep_masks = bool(config.get('val_save_keep_masks', False))
+        self.val_keep_masks_dir = None
+        if self.val_save_keep_masks:
+            default_keep_dir = config.get('val_keep_masks_dir',
+                                          os.path.join(config.get('image_save', config.get('save_root', '.')),
+                                                       'val_metrics_keep'))
+            try:
+                os.makedirs(default_keep_dir, exist_ok=True)
+                self.val_keep_masks_dir = default_keep_dir
+            except Exception as _mk_err:
+                print(f"[val] Failed to create val_keep_masks_dir '{default_keep_dir}': {_mk_err}")
+                self.val_keep_masks_dir = None
 
         # Dataset loader
         level = config['noise_level']  # set noise level
@@ -857,6 +870,15 @@ class Cyc_Trainer():
                         PSNR = 0.0
                         SSIM = 0.0
                         num = 0
+
+                        def _save_val_keep_mask(slice_name: str, mask_arr):
+                            if not self.val_keep_masks_dir:
+                                return
+                            try:
+                                keep_png = ((np.asarray(mask_arr) > 0).astype(np.uint8) * 255)
+                                cv2.imwrite(os.path.join(self.val_keep_masks_dir, f"{slice_name}.png"), keep_png)
+                            except Exception:
+                                pass
                         with (vprogress if vprogress is not None else nullcontext()):
                             if vprogress is not None:
                                 vtask = vprogress.add_task(
@@ -924,6 +946,9 @@ class Cyc_Trainer():
                                                 if keep2d is not None and keep2d.sum() <= 0:
                                                     keep2d = body  # 回退
 
+                                            if self.val_keep_masks_dir and keep2d is not None:
+                                                _save_val_keep_mask(compose_slice_name(batch, i, b), keep2d)
+
                                             if self.val_metrics_use_rd and (keep2d is not None):
                                                 mae_b += _masked_mae_np(f, r, keep2d)
                                                 psnr_b += _masked_psnr_np(f, r, keep2d)
@@ -969,6 +994,9 @@ class Cyc_Trainer():
                                                 pass
                                             if keep2d is not None and keep2d.sum() <= 0:
                                                 keep2d = body
+
+                                        if self.val_keep_masks_dir and keep2d is not None:
+                                            _save_val_keep_mask(compose_slice_name(batch, i, 0), keep2d)
 
                                         if self.val_metrics_use_rd and (keep2d is not None):
                                             mae_b = _masked_mae_np(f, r, keep2d)
@@ -1081,10 +1109,10 @@ class Cyc_Trainer():
 
                                 if imgs_real and imgs_pred and _is_main_process():
                                     wandb.log({
-                                        'images/val_input_A': imgs_input,
-                                        'images/val_real_B': imgs_real,
-                                        'images/val_pred_B': imgs_pred,
-                                        'images/val_mask_keep': imgs_mask_keep,
+                                        f'tables/val_input_A_ep{epoch + 1:04d}': imgs_input,
+                                        f'tables/val_real_B_ep{epoch + 1:04d}': imgs_real,
+                                        f'tables/val_pred_B_ep{epoch + 1:04d}': imgs_pred,
+                                        f'tables/val_mask_keep_ep{epoch + 1:04d}': imgs_mask_keep,
                                         'epoch': epoch + 1,
                                     })
                         except Exception as e:
@@ -1135,7 +1163,17 @@ class Cyc_Trainer():
                         try:
                             if self.val_track_enable and isinstance(self.val_track_indices, list) and len(
                                     self.val_track_indices) > 0:
-                                tbl = wandb.Table(columns=["id", "input", "truth", "pred", "rd_weight"])
+                                tbl = wandb.Table(columns=[
+                                    "id",
+                                    "input",
+                                    "truth",
+                                    "pred",
+                                    "rd_weight",
+                                    "keep_w2d",
+                                    "body_mask",
+                                    "body_fuzzy",
+                                    "rd_source_exclude",
+                                ])
                                 # eval mode
                                 self.netG_A2B.eval()
                                 for idx in self.val_track_indices:
@@ -1172,6 +1210,8 @@ class Cyc_Trainer():
 
                                     # Optional RD weight preview (grayscale 0..255)
                                     W_img = None
+                                    keep_array = None
+                                    raw_rd_mask = None
                                     try:
                                         # 仅当存在真实文件时才展示 rd 预览，避免把“前景回退权重”当作 mask 展示
                                         if bool(sample.get('rd_has_file', False)):
@@ -1182,18 +1222,86 @@ class Cyc_Trainer():
                                                 w = np.squeeze(w)
                                                 if w.ndim == 3 and w.shape[0] == 1:
                                                     w = w[0]
-                                                w = w.astype(np.float32)
-                                                w_min, w_max = float(np.min(w)), float(np.max(w))
+                                                keep_array = np.clip(w.astype(np.float32), 0.0, 1.0)
+                                                w_min, w_max = float(np.min(keep_array)), float(np.max(keep_array))
                                                 if w_max > w_min:
-                                                    w_vis = ((w - w_min) / (w_max - w_min + 1e-6) * 255.0).clip(0,
-                                                                                                                255).astype(
+                                                    w_vis = ((keep_array - w_min) / (w_max - w_min + 1e-6) * 255.0).clip(0,
+                                                                                                                        255).astype(
                                                         np.uint8)
                                                 else:
-                                                    w_vis = np.zeros_like(w, dtype=np.uint8)
+                                                    w_vis = np.zeros_like(keep_array, dtype=np.uint8)
                                                 W_img = wandb.Image(w_vis,
                                                                     caption=f"rd_weight (file) [{w_min:.3f},{w_max:.3f}]")
+                                                # 额外：加载原始排除 mask 便于检查
+                                                base_mask = None
+                                                if self.rd_mask_dir:
+                                                    slice_name = sid_str
+                                                    npy_path = os.path.join(self.rd_mask_dir, f"{slice_name}.npy")
+                                                    png_path = os.path.join(self.rd_mask_dir, f"{slice_name}.png")
+                                                    if os.path.exists(npy_path):
+                                                        try:
+                                                            base_mask = np.load(npy_path)
+                                                        except Exception:
+                                                            base_mask = None
+                                                    elif os.path.exists(png_path):
+                                                        try:
+                                                            base_mask = cv2.imread(png_path, cv2.IMREAD_UNCHANGED)
+                                                            if base_mask is not None and base_mask.ndim == 3:
+                                                                base_mask = cv2.cvtColor(base_mask, cv2.COLOR_BGR2GRAY)
+                                                        except Exception:
+                                                            base_mask = None
+                                                if base_mask is not None:
+                                                    base_mask = np.squeeze(base_mask)
+                                                    if base_mask.shape != body_mask.shape:
+                                                        try:
+                                                            base_mask = cv2.resize(
+                                                                base_mask.astype(np.float32),
+                                                                (body_mask.shape[1], body_mask.shape[0]),
+                                                                interpolation=cv2.INTER_NEAREST,
+                                                            )
+                                                        except Exception:
+                                                            base_mask = None
+                                                    if base_mask is not None:
+                                                        base_mask = base_mask.astype(np.float32)
+                                                        if base_mask.max() > 1.0:
+                                                            base_mask = base_mask / 255.0
+                                                        raw_rd_mask = wandb.Image(
+                                                            (np.clip(base_mask, 0.0, 1.0) * 255.0).astype(np.uint8),
+                                                            caption="rd_source_exclude",
+                                                        )
                                     except Exception:
                                         W_img = None
+
+                                    # 记录 keep 权重与 body mask 的可视化
+                                    keep_img = None
+                                    body_img = None
+                                    body_fuzzy_img = None
+                                    try:
+                                        body_arr = np.squeeze(B_np)
+                                        if body_arr.ndim == 3 and body_arr.shape[0] == 1:
+                                            body_arr = body_arr[0]
+                                        body_mask = (body_arr != -1).astype(np.uint8)
+                                        body_img = wandb.Image((body_mask * 255).astype(np.uint8), caption="body")
+                                        body_fuzzy = (np.abs(body_arr + 1.0) < 5e-3).astype(np.uint8)
+                                        body_fuzzy_img = wandb.Image((body_fuzzy * 255).astype(np.uint8), caption="body_fuzzy")
+                                        if keep_array is not None:
+                                            if keep_array.shape != body_mask.shape:
+                                                try:
+                                                    keep_array = cv2.resize(
+                                                        keep_array.astype(np.float32),
+                                                        (body_mask.shape[1], body_mask.shape[0]),
+                                                        interpolation=cv2.INTER_NEAREST,
+                                                    )
+                                                except Exception:
+                                                    pass
+                                            keep_img = wandb.Image(
+                                                (np.clip(keep_array, 0.0, 1.0) * 255.0).astype(np.uint8),
+                                                caption="keep_w2d",
+                                            )
+                                    except Exception:
+                                        body_img = None
+                                        body_fuzzy_img = None
+                                        keep_img = None
 
                                     # Convert to uint8
                                     def _to_uint8(a):
@@ -1215,10 +1323,14 @@ class Cyc_Trainer():
                                         wandb.Image(_to_uint8(B_np), caption=f"{sid_str}: truth"),
                                         wandb.Image(_to_uint8(P_np), caption=f"{sid_str}: pred"),
                                         W_img,
+                                        keep_img,
+                                        body_img,
+                                        body_fuzzy_img,
+                                        raw_rd_mask,
                                     )
                                 if _is_main_process():
                                     wandb.log({
-                                        'val/track_triplets': tbl,
+                                        f'tables/track_triplets_ep{epoch + 1:04d}': tbl,
                                         'epoch': epoch + 1,
                                     })
                         except Exception as e:
@@ -1291,6 +1403,7 @@ class Cyc_Trainer():
         # Plotting controls
         save_composite = bool(self.config.get('save_composite', True))  # master switch to save composite figures
         plot_every_n = int(self.config.get('plot_every_n', 1))  # save 1 of every N slices (1 = all)
+        plot_workers = int(self.config.get('test_plot_workers', 0))
 
         # Whether to use RD masks/weights for metrics during test (foreground minus misalignment area)
         test_metrics_use_rd = bool(self.config.get('test_metrics_use_rd', self.config.get('val_metrics_use_rd', self.config.get('metrics_use_rd', False))))
@@ -1358,6 +1471,58 @@ class Cyc_Trainer():
             # For MC runs accumulate per-slice metrics
             per_slice_values = {}  # key: slice_name -> {'mae':[], 'psnr':[], 'ssim':[]}
 
+            # Run composites out-of-process to avoid Matplotlib GIL contention
+            plot_executor = ProcessPoolExecutor(max_workers=plot_workers) if (plot_workers > 0 and save_composite) else None
+            plot_futures = []
+            plot_progress = None
+            plot_task_id = None
+            plot_task_total = 0
+            if plot_executor is not None and _is_main_process():
+                plot_progress = Progress(
+                    TextColumn("[magenta]Plots[/]"),
+                    BarColumn(),
+                    MofNCompleteColumn(),
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                )
+
+            def _schedule_plot(timer_key: str, **call_kwargs):
+                if not save_composite:
+                    return
+                if plot_executor is None:
+                    with _Timer(timer_key, prof):
+                        plot_composite(**call_kwargs)
+                else:
+                    nonlocal plot_task_id, plot_task_total
+                    fut = plot_executor.submit(plot_composite, **call_kwargs)
+                    plot_futures.append(fut)
+                    if plot_progress is not None:
+                        if plot_task_id is None:
+                            plot_task_id = plot_progress.add_task("plots", total=0)
+                            plot_task_total = 0
+                        plot_task_total += 1
+                        plot_progress.update(plot_task_id, total=plot_task_total)
+
+            def _drain_plot_futures():
+                if plot_executor is None:
+                    return
+                pending = []
+                for fut in plot_futures:
+                    if fut.done():
+                        _await_plot_future(fut)
+                    else:
+                        pending.append(fut)
+                plot_futures[:] = pending
+
+            def _await_plot_future(fut):
+                nonlocal plot_task_id
+                try:
+                    fut.result()
+                except Exception as exc:
+                    print(f"[test][warn] plot task failed: {exc}")
+                if plot_progress is not None and plot_task_id is not None:
+                    plot_progress.advance(plot_task_id)
+
             # Defer composite plotting until std (uncertainty) is available
             composite_cache = {}
             # 不再单独保存不确定性图；如需恢复，置 True
@@ -1382,7 +1547,18 @@ class Cyc_Trainer():
 
             total_processed_slices = 0
 
-            with (progress if progress is not None else nullcontext()):
+            context_managers = []
+            if progress is not None:
+                context_managers.append(progress)
+            if plot_progress is not None:
+                context_managers.append(plot_progress)
+
+            from contextlib import ExitStack
+
+            with ExitStack() as stack:
+                for cm in context_managers:
+                    stack.enter_context(cm)
+
                 if progress is not None:
                     task_id = progress.add_task("eval", total=total_slices if (
                             isinstance(total_slices, int) and total_slices > 0) else None)
@@ -1391,6 +1567,7 @@ class Cyc_Trainer():
 
                 for i, batch in enumerate(self.val_data):
                     with _Timer('batch_total', prof):
+                        _drain_plot_futures()
                         # Move to GPU
                         real_A = batch['A'].to(self.device, non_blocking=True)
                         real_Bt = batch['B'].to(self.device, non_blocking=True)
@@ -1617,8 +1794,10 @@ class Cyc_Trainer():
                                                     if seed_open_r > 0:
                                                         seeds = opening(seeds, disk(int(seed_open_r)))
 
+                                            nonempty = bool(np.any(seeds))
+
                                             # 4) Optional fallback: allow empty (preferred) or percentile fallback (legacy)
-                                            if not np.any(seeds):
+                                            if not nonempty:
                                                 with _Timer('rd_seed_post', prof):
                                                     if rd_allow_empty:
                                                         # Do NOT force-create seeds; leave empty and mark as nonempty=False
@@ -1631,10 +1810,8 @@ class Cyc_Trainer():
                                                             body) else Tl_fix
                                                         seeds = (absz >= thr) & body
 
+                                            nonempty = bool(np.any(seeds))
                                             min_area = max(1, int(area_fr * max(1, body_area)))
-                                            # If fallback above set nonempty, keep; otherwise recompute here
-                                            if 'nonempty' not in locals():
-                                                nonempty = bool(seeds.any())
                                             # Seed dilation as before
                                             if nonempty and seed_dilate > 0:
                                                 from skimage.morphology import binary_dilation, disk
@@ -1759,11 +1936,19 @@ class Cyc_Trainer():
                                                            'weight_map': weight_map,
                                                            'q_fdr': self.config.get('rd_fdr_q', 0.10)}
                                             save_path = os.path.join(self.config['image_save'], f"{slice_name}.png")
-                                            with _Timer('plot_immediate', prof):
-                                                plot_composite(inp=inp, gt=gt, pred=pred, residual=residual,
-                                                               metrics=metrics, rd_data=rd_pack, uncertainty=None,
-                                                               use_reg=use_reg, save_path=save_path,
-                                                               overlay_rgb=metrics_keep_vis)
+                                            _schedule_plot(
+                                                'plot_immediate',
+                                                inp=inp,
+                                                gt=gt,
+                                                pred=pred,
+                                                residual=residual,
+                                                metrics=metrics,
+                                                rd_data=rd_pack,
+                                                uncertainty=None,
+                                                use_reg=use_reg,
+                                                save_path=save_path,
+                                                overlay_rgb=metrics_keep_vis,
+                                            )
                                             counters['plots'] += 1
                                         counters['plot_enqueued'] = counters.get('plot_enqueued', 0) + 1
 
@@ -1827,13 +2012,26 @@ class Cyc_Trainer():
                                 plot_ok = (plot_every_n <= 1) or (
                                         (counters.get('plot_enqueued_after', 0) % max(1, plot_every_n)) == 0)
                                 if plot_ok:
-                                    with _Timer('plot_after_mc', prof):
-                                        plot_composite(inp=inp, gt=gt, pred=pred, residual=residual,
-                                                       metrics=metrics, rd_data=rd_pack, uncertainty=None,
-                                                       use_reg=use_reg, save_path=save_path,
-                                                       overlay_rgb=metrics_keep_vis_cache)
+                                    _schedule_plot(
+                                        'plot_after_mc',
+                                        inp=inp,
+                                        gt=gt,
+                                        pred=pred,
+                                        residual=residual,
+                                        metrics=metrics,
+                                        rd_data=rd_pack,
+                                        uncertainty=None,
+                                        use_reg=use_reg,
+                                        save_path=save_path,
+                                        overlay_rgb=metrics_keep_vis_cache,
+                                    )
                                     counters['plots'] += 1
                                 counters['plot_enqueued_after'] = counters.get('plot_enqueued_after', 0) + 1
+
+            if plot_executor is not None:
+                for fut in plot_futures:
+                    _await_plot_future(fut)
+                plot_executor.shutdown(wait=True)
 
             # Compute overall averages over all (MC × slices) for quick reference
             avg_mae = MAE / N if N > 0 else float('nan')

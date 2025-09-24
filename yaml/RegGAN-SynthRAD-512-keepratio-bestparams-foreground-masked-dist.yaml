@@ -6,7 +6,7 @@ noise_level: 0  #  noise level
 port: 6019   #  port parameters
 save_root: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/'
 #save_root: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-masked-dist/NC+R/'
-image_save: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/' # with-mask test
+image_save: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-with-mask/' # with-mask test
 #image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/' # no-mask test
 
 wandb_project: RegGAN
@@ -33,7 +33,7 @@ output_nc: 1
 cuda: True
 save_every_n_epochs: 5
 
-n_cpu: 4                 # 或者 8~12，视CPU核数而定；单卡训练通常 4~12 都OK
+n_cpu: 2                 # 或者 8~12，视CPU核数而定；单卡训练通常 4~12 都OK
 dataloader_timeout: 30
 persistent_workers: true
 prefetch_factor: 2
@@ -75,12 +75,15 @@ rd_min_highz_pixels: 2
 # === Residual detect usage ===
 # rd_mode: none / mask / weights
 rd_mode: mask
-rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-test-without-mask/rd_masks'
+#rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-test-without-mask/rd_masks' # test mask only
+#rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-train-without-mask-dist/rd_masks' # train + test masks
+rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/rd_masks' # self test masks
 #rd_weights_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/rd_weights'
 rd_w_min: 0.0
 
 rd_scan_on_init: false
 
 # 测试阶段是否用 RD 掩膜忽略不对齐区域
-metrics_use_rd: false
-test_metrics_use_rd: false
+metrics_use_rd: true
+test_metrics_use_rd: true
+test_plot_workers: 8

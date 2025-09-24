@@ -5,7 +5,7 @@ regist: True    # With or without registration network
 noise_level: 0  #  noise level
 port: 6019   #  port parameters
 save_root: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/'
-image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-train-without-mask/'
+image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-train-without-mask-dist/'
 
 # lamda weight
 Adv_lamda: 1
@@ -80,3 +80,5 @@ rd_scan_on_init: false
 # 测试阶段是否用 RD 掩膜忽略不对齐区域
 metrics_use_rd: false
 test_metrics_use_rd: false
+
+test_plot_workers: 8
