@@ -4,10 +4,13 @@ bidirect: False # Unidirectional or bidirectional
 regist: True    # With or without registration network
 noise_level: 0  #  noise level
 port: 6019   #  port parameters
-save_root: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/'
-image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-test-with-mask-final/'
+save_root: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-fold3/'
+image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-fold3/img-val-fold1-without-mask/'
 #g_model_name: 'netG_A2B_ep0030.pth'
 #r_model_name: 'R_A_ep0030.pth'
+wandb_project: RegGAN
+wandb_run_name: RegGAN-masked-fold3
+wandb_tags: ['SynthRAD2023', '512', 'bestparams', 'keepratio', 'reg-masked', 'foreground-only', 'cv-fold3']
 
 # lamda weight
 Adv_lamda: 1
@@ -19,9 +22,9 @@ Smooth_lamda: 10
 epoch: 0        # starting epoch
 n_epochs: 80       # How often do you want to display output images during training
 batchSize: 8               # size of the batches
-dataroot: 'data/SynthRAD2023-Task1/train2D-foreground/'     # root directory of the dataset
+dataroot: 'data/SynthRAD2023-Task1/cv_folds/fold_3/train/'     # root directory of the dataset
 #val_dataroot: 'data/SynthRAD2023-Task1/test2D-foreground/'
-val_dataroot: 'data/SynthRAD2023-Task1/test2D-foreground/'
+val_dataroot: 'data/SynthRAD2023-Task1/cv_folds/fold_1/val/'
 lr: 0.0001                   # initial learning rate
 decay_epoch: 20            # epoch to start linearly decaying the learning rate to 0
 size: 512                # size of the data crop
@@ -30,7 +33,7 @@ output_nc: 1
 cuda: True
 save_every_n_epochs: 5
 
-n_cpu: 4                 # 或者 8~12，视CPU核数而定；单卡训练通常 4~12 都OK
+n_cpu: 2                 # 或者 8~12，视CPU核数而定；单卡训练通常 4~12 都OK
 dataloader_timeout: 60
 persistent_workers: true
 prefetch_factor: 2

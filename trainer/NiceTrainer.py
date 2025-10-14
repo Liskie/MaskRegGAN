@@ -8,7 +8,7 @@ from torch.autograd import Variable
 import os
 from .datasets import ImageDataset,ValDataset
 from models.NiceGan import *
-from .utils import Resize,ToTensor,smooothing_loss
+from .utils import Resize,ToTensor,smooothing_loss, resolve_model_path
 from .utils import Logger
 from .reg import Reg
 from torchvision.transforms import RandomAffine
@@ -347,7 +347,8 @@ class Nice_Trainer():
                     
                          
     def test(self,):
-        self.netG_A2B.load_state_dict(torch.load(self.config['save_root'] + 'netG_A2B.pth'))
+        g_ckpt_path = resolve_model_path(self.config, 'g_model_name', 'netG_A2B.pth')
+        self.netG_A2B.load_state_dict(torch.load(g_ckpt_path))
         with torch.no_grad():
                 MAE = 0
                 PSNR = 0
@@ -392,4 +393,3 @@ class Nice_Trainer():
             
             
             
-

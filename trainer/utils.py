@@ -12,6 +12,8 @@ from PIL import Image as PILImage
 # 放在 utils.py 顶部（如未导入）
 import matplotlib.pyplot as plt
 import os
+import math
+from skimage.metrics import structural_similarity
 
 
 class Resize():
@@ -51,6 +53,31 @@ def tensor2image(tensor):
         image = np.tile(image, (3, 1, 1))
     # print ('image1.shape:',image1.shape)
     return image1.astype(np.uint8)
+
+
+def resolve_model_path(config: dict, name_key: str, default_name: str) -> str:
+    """Return the checkpoint path for a model, honoring overrides in the config.
+
+    If the config provides an absolute or explicit path in ``name_key`` it is used
+    as-is. Otherwise the value (or ``default_name`` when unset) is joined with the
+    ``save_root`` directory so legacy configs keep working out-of-the-box.
+    """
+
+    save_root = os.path.expanduser(config.get('save_root', '') or '')
+    override = config.get(name_key)
+
+    def _materialize(value: str) -> str:
+        value = os.path.expanduser(str(value))
+        if os.path.isabs(value):
+            return value
+        if save_root:
+            return os.path.normpath(os.path.join(save_root, value))
+        return os.path.normpath(value)
+
+    if override:
+        return _materialize(override)
+
+    return _materialize(default_name)
 
 
 class Logger:
@@ -671,3 +698,135 @@ def masked_l1(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor, ep
     num = (weight * diff).sum()
     den = weight.sum().clamp_min(eps)
     return num / den
+
+
+def _squeeze_to_image(arr):
+    a = np.asarray(arr)
+    if a.ndim == 0:
+        return a.reshape(1, 1).astype(np.float64)
+    # Iteratively drop singleton dims while preserving last two dims
+    while a.ndim > 2:
+        if a.shape[0] == 1:
+            a = a[0]
+        else:
+            a = np.squeeze(a)
+            if a.ndim > 2 and a.shape[0] != 1:
+                break
+    a = np.squeeze(a)
+    if a.ndim == 1:
+        a = a.reshape(1, -1)
+    if a.ndim != 2:
+        a = np.atleast_2d(a)
+    return a.astype(np.float64)
+
+
+def _build_metric_weights(target, mask=None, background_val=-1.0, eps=1e-6):
+    tgt = _squeeze_to_image(target)
+    body = (tgt != background_val).astype(np.float64)
+    if mask is None:
+        weights = body
+    else:
+        m = _squeeze_to_image(mask).astype(np.float64)
+        if m.shape != body.shape:
+            try:
+                m = np.broadcast_to(m, body.shape)
+            except ValueError:
+                raise ValueError(f"Mask shape {m.shape} does not match target shape {body.shape}")
+        weights = np.clip(m, 0.0, 1.0) * body
+    weight_sum = float(np.sum(weights))
+    if weight_sum <= eps:
+        weight_sum = float(np.sum(body))
+        weights = body if weight_sum > eps else None
+    return weights, weight_sum
+
+
+def _ssim_effective_window_size(image_shape):
+    """Mirror skimage's window selection: default 7, shrink on small inputs, keep odd."""
+    if not image_shape:
+        return 1
+    h, w = int(image_shape[-2]), int(image_shape[-1])
+    min_dim = min(h, w)
+    if min_dim <= 1:
+        return 1
+    win = 7 if min_dim >= 7 else max(1, min_dim)
+    if win % 2 == 0:
+        win = max(1, win - 1)
+    return max(1, win)
+
+
+def _windowed_fraction_map(base_mask, body_mask, win_size):
+    """Average mask coverage inside each SSIM window, zeroing out true background."""
+    base = np.asarray(base_mask, dtype=np.float64)
+    body = np.asarray(body_mask, dtype=np.float64)
+    if base.shape != body.shape:
+        base = np.broadcast_to(base, body.shape)
+    if win_size <= 1:
+        cov = base
+    else:
+        pad = win_size // 2
+        padded = np.pad(base, ((pad, pad), (pad, pad)), mode='reflect')
+        view = np.lib.stride_tricks.sliding_window_view(padded, (win_size, win_size))
+        cov = view.sum(axis=(-2, -1)) / float(win_size * win_size)
+    return cov * body
+
+
+def compute_mae(pred, target, mask=None, background_val=-1.0, eps=1e-6):
+    """Mean absolute error in [0,1] space with optional mask (0..1 weights)."""
+    fake = _squeeze_to_image(pred)
+    real = _squeeze_to_image(target)
+    weights, weight_sum = _build_metric_weights(real, mask, background_val, eps)
+    abs_err = np.abs(fake - real) / 2.0
+    if weights is not None and weight_sum > eps:
+        return float(np.sum(abs_err * weights) / weight_sum)
+    return float(np.mean(abs_err))
+
+
+def compute_psnr(pred, target, mask=None, background_val=-1.0, eps=1e-6):
+    """PSNR in dB using masked MSE in [0,1] space."""
+    fake = _squeeze_to_image(pred)
+    real = _squeeze_to_image(target)
+    weights, weight_sum = _build_metric_weights(real, mask, background_val, eps)
+    diff01 = ((fake + 1.0) * 0.5) - ((real + 1.0) * 0.5)
+    mse = None
+    if weights is not None and weight_sum > eps:
+        mse = float(np.sum(weights * (diff01 * diff01)) / weight_sum)
+    else:
+        mse = float(np.mean(diff01 * diff01))
+    if mse < 1.0e-10:
+        return 100.0
+    return float(20.0 * math.log10(1.0 / math.sqrt(mse)))
+
+
+def compute_ssim(pred, target, mask=None, background_val=-1.0, eps=1e-6):
+    """SSIM averaged over masked region (background excluded by default)."""
+    fake = _squeeze_to_image(pred)
+    real = _squeeze_to_image(target)
+    weights, weight_sum = _build_metric_weights(real, mask, background_val, eps)
+    body = (real != background_val).astype(np.float64)
+    base_mask = weights if weights is not None else body
+    try:
+        ssim_val, ssim_map = structural_similarity(fake, real, data_range=2.0, full=True)
+    except Exception:
+        ssim_val, ssim_map = structural_similarity(fake.astype(np.float64),
+                                                   real.astype(np.float64),
+                                                   data_range=2.0, full=True)
+    ssim_map = _squeeze_to_image(ssim_map)
+    if ssim_map.shape != real.shape:
+        try:
+            ssim_map = np.broadcast_to(ssim_map, real.shape)
+        except ValueError:
+            raise ValueError(f"SSIM map shape {ssim_map.shape} mismatches target {real.shape}")
+    win_size = _ssim_effective_window_size(real.shape)
+    coverage = _windowed_fraction_map(base_mask, body, win_size)
+    coverage_sum = float(np.sum(coverage))
+    if coverage_sum <= eps:
+        if weights is not None and weight_sum > eps:
+            if weights.shape != ssim_map.shape:
+                try:
+                    weights_b = np.broadcast_to(weights, ssim_map.shape)
+                except ValueError:
+                    raise ValueError(f"SSIM map shape {ssim_map.shape} mismatches weights {weights.shape}")
+                weights = weights_b
+            return float(np.sum(ssim_map * weights) / weight_sum)
+        return float(ssim_val)
+    return float(np.sum(ssim_map * coverage) / coverage_sum)

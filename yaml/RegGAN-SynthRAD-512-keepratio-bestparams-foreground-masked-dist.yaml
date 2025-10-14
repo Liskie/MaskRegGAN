@@ -7,7 +7,8 @@ port: 6019   #  port parameters
 save_root: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/'
 #save_root: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-masked-dist/NC+R/'
 image_save: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-with-mask/' # with-mask test
-#image_save: './output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/' # no-mask test
+#image_save: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/' # no-mask test
+
 
 wandb_project: RegGAN
 wandb_run_name: RegGAN-masked
@@ -76,8 +77,8 @@ rd_min_highz_pixels: 2
 # rd_mode: none / mask / weights
 rd_mode: mask
 #rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-test-without-mask/rd_masks' # test mask only
-#rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-train-without-mask-dist/rd_masks' # train + test masks
-rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/rd_masks' # self test masks
+rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-dist/NC+R/img-foreground-train-without-mask-dist/rd_masks' # train + test masks
+#rd_mask_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/rd_masks' # self test masks
 #rd_weights_dir: 'output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-masked-dist/NC+R/img-foreground-test-without-mask/rd_weights'
 rd_w_min: 0.0
 

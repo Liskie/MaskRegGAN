@@ -10,7 +10,7 @@ from .utils import LambdaLR, Logger, ReplayBuffer
 from .utils import weights_init_normal, get_config
 from .datasets import ImageDataset, ValDataset
 from models.Munit import *
-from .utils import Resize, ToTensor, smooothing_loss
+from .utils import Resize, ToTensor, smooothing_loss, resolve_model_path
 from .utils import Logger
 from .reg import Reg
 from torchvision.transforms import RandomAffine
@@ -485,12 +485,10 @@ class Munit_Trainer(nn.Module):
     def test(
         self,
     ):
-        self.netG_A2B.load_state_dict(
-            torch.load(self.config["save_root"] + "netG_A2B.pth")
-        )
-        self.netG_B2A.load_state_dict(
-            torch.load(self.config["save_root"] + "netG_B2A.pth")
-        )
+        g_a2b_ckpt = resolve_model_path(self.config, 'g_model_name', 'netG_A2B.pth')
+        g_b2a_ckpt = resolve_model_path(self.config, 'g_model_name_b2a', 'netG_B2A.pth')
+        self.netG_A2B.load_state_dict(torch.load(g_a2b_ckpt))
+        self.netG_B2A.load_state_dict(torch.load(g_b2a_ckpt))
         with torch.no_grad():
             MAE = 0
             PSNR = 0

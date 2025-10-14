@@ -12,7 +12,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 from torchvision.transforms import RandomAffine, ToPILImage
-from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+from skimage.metrics import peak_signal_noise_ratio
 import numpy as np
 import cv2
 from PIL import Image as PILImage
@@ -31,7 +31,8 @@ from .utils import (
     Resize, ToTensor, smooothing_loss, LambdaLR, Logger, ReplayBuffer, plot_composite,
     ResizeKeepRatioPad,
     norm01, robust_zscore, normal_cdf, bh_fdr_mask, hysteresis_from_seeds, morph_clean, save_gray_png,
-    compose_slice_name, load_weight_or_mask_for_slice, load_weights_for_batch, masked_l1
+    compose_slice_name, load_weight_or_mask_for_slice, load_weights_for_batch, masked_l1,
+    compute_mae, compute_psnr, compute_ssim, resolve_model_path
 )
 from .datasets import ImageDataset, ValDataset
 from .reg import Reg
@@ -819,41 +820,6 @@ class Cyc_Trainer():
                         self.R_A.eval()
                     with torch.no_grad():
                         # --- Optional masked metrics helpers for validation ---
-                        def _masked_mae_np(pred, target, w):
-                            if w is None:
-                                return float(np.mean(np.abs(pred - target)))
-                            w = np.asarray(w, dtype=np.float32)
-                            num = np.sum(w * np.abs(pred - target))
-                            den = np.sum(w)
-                            return float(num / den) if den > 1e-6 else float(np.mean(np.abs(pred - target)))
-
-                        def _masked_psnr_np(pred, target, w):
-                            diff01 = ((pred + 1.0) * 0.5) - ((target + 1.0) * 0.5)
-                            if w is None:
-                                mse = float(np.mean(diff01 * diff01))
-                            else:
-                                w = np.asarray(w, dtype=np.float32)
-                                num = float(np.sum(w * (diff01 * diff01)))
-                                den = float(np.sum(w))
-                                mse = (num / den) if den > 1.0e-6 else float(np.mean(diff01 * diff01))
-                            if mse < 1.0e-10:
-                                return 100.0
-                            PIXEL_MAX = 1.0
-                            return float(20.0 * math.log10(PIXEL_MAX / math.sqrt(mse)))
-
-                        def _masked_ssim_np(pred, target, w):
-                            try:
-                                ssim_val, ssim_map = structural_similarity(pred, target, data_range=2.0, full=True)
-                            except Exception:
-                                ssim_val, ssim_map = structural_similarity(pred.astype(np.float64),
-                                                                           target.astype(np.float64),
-                                                                           data_range=2.0, full=True)
-                            if w is None:
-                                return float(ssim_val)
-                            m = (np.asarray(w, dtype=np.float32) > 0).astype(np.float32)
-                            den = float(np.sum(m))
-                            return float(np.sum(ssim_map * m) / den) if den > 0 else float(ssim_val)
-
                         # Set up a progress bar for validation
                         try:
                             total_val_batches = len(self.val_data)
@@ -949,19 +915,10 @@ class Cyc_Trainer():
                                             if self.val_keep_masks_dir and keep2d is not None:
                                                 _save_val_keep_mask(compose_slice_name(batch, i, b), keep2d)
 
-                                            if self.val_metrics_use_rd and (keep2d is not None):
-                                                mae_b += _masked_mae_np(f, r, keep2d)
-                                                psnr_b += _masked_psnr_np(f, r, keep2d)
-                                                ssim_b += _masked_ssim_np(f, r, keep2d)
-                                            else:
-                                                mae_b += self.MAE(f, r)
-                                                psnr_b += self.PSNR(f, r, mode='correct')
-                                                try:
-                                                    ssim_b += structural_similarity(f, r, data_range=2.0)
-                                                except Exception:
-                                                    ssim_b += structural_similarity(f.astype(np.float64),
-                                                                                    r.astype(np.float64),
-                                                                                    data_range=2.0)
+                                            mask_for_metrics = keep2d if (self.val_metrics_use_rd and keep2d is not None) else None
+                                            mae_b += compute_mae(f, r, mask=mask_for_metrics)
+                                            psnr_b += compute_psnr(f, r, mask=mask_for_metrics)
+                                            ssim_b += compute_ssim(f, r, mask=mask_for_metrics)
                                         mae_b /= float(Bnow)
                                         psnr_b /= float(Bnow)
                                         ssim_b /= float(Bnow)
@@ -998,18 +955,10 @@ class Cyc_Trainer():
                                         if self.val_keep_masks_dir and keep2d is not None:
                                             _save_val_keep_mask(compose_slice_name(batch, i, 0), keep2d)
 
-                                        if self.val_metrics_use_rd and (keep2d is not None):
-                                            mae_b = _masked_mae_np(f, r, keep2d)
-                                            psnr_b = _masked_psnr_np(f, r, keep2d)
-                                            ssim_b = _masked_ssim_np(f, r, keep2d)
-                                        else:
-                                            mae_b = self.MAE(f, r)
-                                            psnr_b = self.PSNR(f, r, mode='correct')
-                                            try:
-                                                ssim_b = structural_similarity(f, r, data_range=2.0)
-                                            except Exception:
-                                                ssim_b = structural_similarity(f.astype(np.float64),
-                                                                               r.astype(np.float64), data_range=2.0)
+                                        mask_for_metrics = keep2d if (self.val_metrics_use_rd and keep2d is not None) else None
+                                        mae_b = compute_mae(f, r, mask=mask_for_metrics)
+                                        psnr_b = compute_psnr(f, r, mask=mask_for_metrics)
+                                        ssim_b = compute_ssim(f, r, mask=mask_for_metrics)
                                 except Exception:
                                     # 回退仅计算 MAE
                                     mae_b = self.MAE(fake_B, real_B)
@@ -1365,7 +1314,8 @@ class Cyc_Trainer():
         quality_ssim_min = float(synth_cfg.get('quality_ssim_min', 0.85))
         quality_mae_max = float(synth_cfg.get('quality_mae_max', 0.12))
 
-        self.netG_A2B.load_state_dict(torch.load(self.config['save_root'] + 'netG_A2B.pth'))
+        g_ckpt_path = resolve_model_path(self.config, 'g_model_name', 'netG_A2B.pth')
+        self.netG_A2B.load_state_dict(torch.load(g_ckpt_path))
         os.makedirs(self.config['image_save'], exist_ok=True)
         pred_save_root = self.config.get('pred_save', os.path.join(self.config['image_save'], 'pred'))
         os.makedirs(pred_save_root, exist_ok=True)
@@ -1374,6 +1324,10 @@ class Cyc_Trainer():
         os.makedirs(mean_save_root, exist_ok=True)
         uncert_save_root = self.config.get('uncert_save', os.path.join(self.config['image_save'], 'uncert'))
         os.makedirs(uncert_save_root, exist_ok=True)
+        residual_save_root = self.config.get('residual_save', os.path.join(self.config['image_save'], 'residual'))
+        save_residuals = bool(self.config.get('save_residuals', True))
+        if save_residuals:
+            os.makedirs(residual_save_root, exist_ok=True)
         # --- Save directories for RD artifacts (for training Scheme B) ---
         rd_seeds_dir = self.config.get('rd_seeds_dir', os.path.join(self.config['image_save'], 'rd_seeds'))
         rd_masks_dir = self.config.get('rd_masks_dir', os.path.join(self.config['image_save'], 'rd_masks'))
@@ -1388,7 +1342,7 @@ class Cyc_Trainer():
                                                                                                                 'R_A') and hasattr(
             self, 'spatial_transform')
         if use_reg:
-            ra_path = os.path.join(self.config['save_root'], 'R_A.pth')
+            ra_path = resolve_model_path(self.config, 'r_model_name', 'R_A.pth')
             if os.path.exists(ra_path):
                 self.R_A.load_state_dict(torch.load(ra_path))
             else:
@@ -1413,42 +1367,6 @@ class Cyc_Trainer():
         # Where to persist the exact keep mask used for metrics
         metrics_keep_dir = os.path.join(self.config['image_save'], 'metrics_keep')
         os.makedirs(metrics_keep_dir, exist_ok=True)
-
-        # --- Optional masked metrics helpers for testing (same as validation) ---
-        def _masked_mae_np(pred, target, w):
-            if w is None:
-                return float(np.mean(np.abs(pred - target)))
-            w = np.asarray(w, dtype=np.float32)
-            num = np.sum(w * np.abs(pred - target))
-            den = np.sum(w)
-            return float(num / den) if den > 1e-6 else float(np.mean(np.abs(pred - target)))
-
-        def _masked_psnr_np(pred, target, w):
-            diff01 = ((pred + 1.0) * 0.5) - ((target + 1.0) * 0.5)
-            if w is None:
-                mse = float(np.mean(diff01 * diff01))
-            else:
-                w = np.asarray(w, dtype=np.float32)
-                num = float(np.sum(w * (diff01 * diff01)))
-                den = float(np.sum(w))
-                mse = (num / den) if den > 1.0e-6 else float(np.mean(diff01 * diff01))
-            if mse < 1.0e-10:
-                return 100.0
-            PIXEL_MAX = 1.0
-            return float(20.0 * math.log10(PIXEL_MAX / math.sqrt(mse)))
-
-        def _masked_ssim_np(pred, target, w):
-            try:
-                ssim_val, ssim_map = structural_similarity(pred, target, data_range=2.0, full=True)
-            except Exception:
-                ssim_val, ssim_map = structural_similarity(pred.astype(np.float64),
-                                                           target.astype(np.float64),
-                                                           data_range=2.0, full=True)
-            if w is None:
-                return float(ssim_val)
-            m = (np.asarray(w, dtype=np.float32) > 0).astype(np.float32)
-            den = float(np.sum(m))
-            return float(np.sum(ssim_map * m) / den) if den > 0 else float(ssim_val)
 
         # Accumulators for prediction mean/std per slice (in [-1,1] space)
         pred_sum = {}
@@ -1673,18 +1591,14 @@ class Cyc_Trainer():
                                                 metrics_keep_vis = np.stack([km, km, np.zeros_like(km)], axis=-1)
                                             except Exception:
                                                 metrics_keep_vis = None
-
-                                        mae_i = _masked_mae_np(fe, r, keep)
-                                        psnr_i = _masked_psnr_np(fe, r, keep)
-                                        ssim_i = _masked_ssim_np(fe, r, keep)
+                                        mask_for_metrics = keep if test_metrics_use_rd else None
+                                        mae_i = compute_mae(fe, r, mask=mask_for_metrics)
+                                        psnr_i = compute_psnr(fe, r, mask=mask_for_metrics)
+                                        ssim_i = compute_ssim(fe, r, mask=mask_for_metrics)
                                     else:
-                                        mae_i = self.MAE(fe, r)
-                                        psnr_i = self.PSNR(fe, r, mode='correct')
-                                        try:
-                                            ssim_i = structural_similarity(fe, r, data_range=2.0)
-                                        except Exception:
-                                            ssim_i = structural_similarity(fe.astype(np.float64), r.astype(np.float64),
-                                                                           data_range=2.0)
+                                        mae_i = compute_mae(fe, r)
+                                        psnr_i = compute_psnr(fe, r)
+                                        ssim_i = compute_ssim(fe, r)
                                 counters['metric_points'] += 1
                                 # 独立导出“评分用 keep mask”
                                 try:
@@ -1735,6 +1649,12 @@ class Cyc_Trainer():
                                     gt = r
                                     pred = fe
                                     residual = pred - gt
+                                    if save_residuals:
+                                        try:
+                                            np.save(os.path.join(residual_save_root, f"{slice_name}.npy"),
+                                                    residual.astype(np.float32))
+                                        except Exception as err:
+                                            print(f"[warn] Failed to save residual for {slice_name}: {err}")
                                     # === Residual-based non-correspondence detection (判空 + 连续区域提取) ===
                                     try:
                                         rd_enable = bool(self.config.get('residual_detect', True))
@@ -2133,31 +2053,7 @@ class Cyc_Trainer():
                 psnr = 20.0 * np.log10(PIXEL_MAX / np.sqrt(mse))
 
         elif mode == 'correct':
-            # ---- Correct method (default) ----
-            # Compute squared error in [0,1] space
-            mse = ((fake + 1.0) / 2.0 - (real + 1.0) / 2.0) ** 2
-
-            # Foreground mask: real != -1 (same shape as data)
-            mask = (real != -1)
-
-            # Try to align dims in case of squeezes/extra singleton dims
-            try:
-                if mask.shape != mse.shape:
-                    mask = np.squeeze(mask)
-                    mse = np.squeeze(mse)
-            except Exception:
-                pass
-
-            if mask.any():
-                mse = mse[mask].mean()
-            else:
-                mse = mse.mean()
-
-            if mse < 1.0e-10:
-                psnr = 100.0
-            else:
-                PIXEL_MAX = 1.0
-                psnr = 20.0 * np.log10(PIXEL_MAX / np.sqrt(mse))
+            psnr = compute_psnr(fake, real)
         elif mode == 'full-image':
             psnr = peak_signal_noise_ratio((real + 1.0) / 2.0, (fake + 1.0) / 2.0, data_range=1.0)
         elif mode == 'skimage':
@@ -2173,27 +2069,7 @@ class Cyc_Trainer():
         return psnr
 
     def MAE(self, fake, real):
-        fake = np.asarray(fake)
-        real = np.asarray(real)
-
-        # Absolute error in [-1,1] space then rescale to [0,1]
-        abs_err = np.abs(fake - real) / 2.0
-
-        # Foreground mask: real != -1
-        mask = (real != -1)
-
-        # Align dims if batch/channel dims exist
-        try:
-            if mask.shape != abs_err.shape:
-                mask = np.squeeze(mask)
-                abs_err = np.squeeze(abs_err)
-        except Exception:
-            pass
-
-        if mask.any():
-            return float(abs_err[mask].mean())
-        else:
-            return float(abs_err.mean())
+        return compute_mae(fake, real)
 
     def save_deformation(self, defms, root):
         heatmapshow = None

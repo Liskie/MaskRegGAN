@@ -27,6 +27,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backe
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-masked-dist.yaml'
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 train.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch-keepratio.yaml'
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold1.yaml'
+
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold2.yaml'
+CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold3.yaml'
 ```
 
 # test RegGAN
@@ -37,8 +42,12 @@ CUDA_VISIBLE_DEVICES=0 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN
 CUDA_VISIBLE_DEVICES=2 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch.yaml'
 CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch-keepratio.yaml'
 CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/CycleGAN-noise0-NC+R(RegGAN)-SynthRAD-bigbatch-keepratio-bestparams.yaml'
-CUDA_VISIBLE_DEVICES=2 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-dist.yaml'
+CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-dist.yaml'
 CUDA_VISIBLE_DEVICES=3 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-masked-dist.yaml'
+
+CUDA_VISIBLE_DEVICES=1 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold1.yaml'
+CUDA_VISIBLE_DEVICES=2 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold2.yaml'
+CUDA_VISIBLE_DEVICES=3 python test.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold3.yaml'
 ```
 
 # Experiment 01 - Deformation Field
@@ -100,3 +109,7 @@ python experiment01-deform-field.py \
   --envelope rss \
   --out_dir 'experiment-results/01-deform-field/CycleGAN_noise5/NC+R/df_eval/'
 ```
+
+Can you check my whole project with focus in trainer/CycTrainer.py, trainer/utils.py and
+ trainer/datasets.py. I want to know how the ssim is calculated with a mask.
+
