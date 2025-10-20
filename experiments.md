@@ -32,6 +32,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backe
 
 CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold2.yaml'
 CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold3.yaml'
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 train.py --config 'yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-foldx.yaml'
 ```
 
 # test RegGAN

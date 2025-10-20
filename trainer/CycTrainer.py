@@ -10,6 +10,7 @@ import copy
 import json
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from typing import Optional
 
 from torchvision.transforms import RandomAffine, ToPILImage
 from skimage.metrics import peak_signal_noise_ratio
@@ -26,6 +27,16 @@ from contextlib import nullcontext
 from torch.autograd import Variable
 import wandb
 from rich.progress import Progress, BarColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn, TextColumn
+
+try:
+    from torchmetrics.image.fid import FrechetInceptionDistance
+except ImportError:
+    FrechetInceptionDistance = None
+
+try:
+    from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+except ImportError:
+    LearnedPerceptualImagePatchSimilarity = None
 
 from .utils import (
     Resize, ToTensor, smooothing_loss, LambdaLR, Logger, ReplayBuffer, plot_composite,
@@ -151,6 +162,7 @@ class Cyc_Trainer():
         self._config_snapshots = {}
         self._config_logged_stages = set()
         self._wandb_settings = self._build_wandb_settings(config)
+        self._progress_disable = bool(config.get('disable_progress', False))
         ## def networks
         self.netG_A2B = Generator(config['input_nc'], config['output_nc']).cuda()
         self.netD_B = Discriminator(config['input_nc']).cuda()
@@ -403,6 +415,7 @@ class Cyc_Trainer():
         os.makedirs(self.save_root, exist_ok=True)
         # 运行标识，便于调试（不影响文件名的去重逻辑）
         self._run_tag = self.config.get('run_tag', datetime.now().strftime("%Y%m%d-%H%M%S"))
+        self._val_metric_support = None
 
 
     # ------------------------------------------------------------------
@@ -488,7 +501,7 @@ class Cyc_Trainer():
         return snap
 
 
-    def train(self):
+    def train(self, max_epochs: Optional[int] = None):
 
         ###### Training ######
 
@@ -595,7 +608,13 @@ class Cyc_Trainer():
 
         # Setup rich progress bar for training with two-level progress (epochs and batches)
         total_epochs = int(self.config['n_epochs'])
-        start_epoch = int(self.config['epoch'])
+        start_epoch = int(self.config.get('epoch', 0))
+        if max_epochs is None:
+            target_epoch = total_epochs
+        else:
+            target_epoch = min(total_epochs, start_epoch + int(max_epochs))
+        if start_epoch >= target_epoch:
+            return
         try:
             total_batches = len(self.train_data)
         except Exception:
@@ -609,13 +628,16 @@ class Cyc_Trainer():
             except Exception:
                 pass
 
-        progress = Progress(
-            TextColumn("[bold green]Train[/]"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) if _is_main_process() else None
+        progress = None
+        if not self._progress_disable and _is_main_process():
+            progress = Progress(
+                TextColumn("[bold green]Train[/]"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+            )
+        num_epochs_this_run = target_epoch - start_epoch
 
         # --- Checkpoint saving cadence ---
         save_every_n = int(self.config.get('save_every_n_epochs', 0))  # 0 disables periodic saving
@@ -636,10 +658,10 @@ class Cyc_Trainer():
         with (progress if progress is not None else nullcontext()):
             # Outer task: epochs
             if progress is not None:
-                task_epochs = progress.add_task(f"Epochs", total=(total_epochs - start_epoch))
+                task_epochs = progress.add_task(f"Epochs", total=num_epochs_this_run)
             else:
                 task_epochs = None
-            for epoch in range(start_epoch, total_epochs):
+            for epoch in range(start_epoch, target_epoch):
                 try:
                     if isinstance(getattr(self.train_data, 'sampler', None), DistributedSampler):
                         self.train_data.sampler.set_epoch(epoch)
@@ -698,6 +720,9 @@ class Cyc_Trainer():
                                     self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir, self.rd_w_min
                                 )
                             sr_core = masked_l1(SysRegist_A2B, real_B, w_batch)
+                        elif 'body_mask' in batch:
+                            w_body = batch['body_mask'].to(real_B.device, dtype=real_B.dtype)
+                            sr_core = masked_l1(SysRegist_A2B, real_B, w_body)
                         else:
                             sr_core = self.L1_loss(SysRegist_A2B, real_B)
                         SR_loss = self.config['Corr_lamda'] * sr_core  ### masked SR
@@ -825,17 +850,34 @@ class Cyc_Trainer():
                             total_val_batches = len(self.val_data)
                         except Exception:
                             total_val_batches = None
-                        vprogress = Progress(
-                            TextColumn("[cyan]Validation[/]"),
-                            BarColumn(),
-                            MofNCompleteColumn(),
-                            TimeElapsedColumn(),
-                            TimeRemainingColumn(),
-                        ) if _is_main_process() else None
-                        MAE = 0.0
-                        PSNR = 0.0
-                        SSIM = 0.0
-                        num = 0
+                        vprogress = None
+                        if not self._progress_disable and _is_main_process():
+                            vprogress = Progress(
+                                TextColumn("[cyan]Validation[/]"),
+                                BarColumn(),
+                                MofNCompleteColumn(),
+                                TimeElapsedColumn(),
+                                TimeRemainingColumn(),
+                            )
+                        mae_sum = 0.0
+                        psnr_sum = 0.0
+                        ssim_sum = 0.0
+                        sample_count = 0
+                        FID_val = None
+                        LPIPS_sum = 0.0
+                        LPIPS_count = 0
+                        val_metrics_modules = self._prepare_val_metrics_modules()
+                        if val_metrics_modules is not None:
+                            fid_metric = val_metrics_modules.get('fid', None)
+                            if fid_metric is not None:
+                                try:
+                                    fid_metric.reset()
+                                except Exception:
+                                    pass
+                            lpips_metric = val_metrics_modules.get('lpips', None)
+                        else:
+                            fid_metric = None
+                            lpips_metric = None
 
                         def _save_val_keep_mask(slice_name: str, mask_arr):
                             if not self.val_keep_masks_dir:
@@ -861,6 +903,23 @@ class Cyc_Trainer():
 
                                 # 前向在 GPU 上
                                 fake_Bt = self.netG_A2B(real_A)
+                                if fid_metric is not None or lpips_metric is not None:
+                                    fake_for_metrics = self._prepare_images_for_metrics(fake_Bt)
+                                    real_for_metrics = self._prepare_images_for_metrics(real_Bt)
+                                    if fid_metric is not None:
+                                        try:
+                                            fid_metric.update(fake_for_metrics, real=False)
+                                            fid_metric.update(real_for_metrics, real=True)
+                                        except Exception:
+                                            pass
+                                    if lpips_metric is not None:
+                                        try:
+                                            lpips_batch = lpips_metric(fake_for_metrics, real_for_metrics)
+                                            if lpips_batch is not None:
+                                                LPIPS_sum += float(lpips_batch.mean().item())
+                                                LPIPS_count += 1
+                                        except Exception:
+                                            pass
 
                                 # 转 numpy 评估
                                 real_B = real_Bt.detach().cpu().numpy()
@@ -875,9 +934,6 @@ class Cyc_Trainer():
                                     # 支持批量 (B,H,W)
                                     if real_B.ndim == 3 and fake_B.ndim == 3:
                                         Bnow = real_B.shape[0]
-                                        mae_b = 0.0
-                                        psnr_b = 0.0
-                                        ssim_b = 0.0
                                         for b in range(Bnow):
                                             r = real_B[b]
                                             f = fake_B[b]
@@ -916,12 +972,10 @@ class Cyc_Trainer():
                                                 _save_val_keep_mask(compose_slice_name(batch, i, b), keep2d)
 
                                             mask_for_metrics = keep2d if (self.val_metrics_use_rd and keep2d is not None) else None
-                                            mae_b += compute_mae(f, r, mask=mask_for_metrics)
-                                            psnr_b += compute_psnr(f, r, mask=mask_for_metrics)
-                                            ssim_b += compute_ssim(f, r, mask=mask_for_metrics)
-                                        mae_b /= float(Bnow)
-                                        psnr_b /= float(Bnow)
-                                        ssim_b /= float(Bnow)
+                                            mae_sum += compute_mae(f, r, mask=mask_for_metrics)
+                                            psnr_sum += compute_psnr(f, r, mask=mask_for_metrics)
+                                            ssim_sum += compute_ssim(f, r, mask=mask_for_metrics)
+                                        sample_count += float(Bnow)
                                     else:
                                         # 单图
                                         r = real_B
@@ -956,19 +1010,14 @@ class Cyc_Trainer():
                                             _save_val_keep_mask(compose_slice_name(batch, i, 0), keep2d)
 
                                         mask_for_metrics = keep2d if (self.val_metrics_use_rd and keep2d is not None) else None
-                                        mae_b = compute_mae(f, r, mask=mask_for_metrics)
-                                        psnr_b = compute_psnr(f, r, mask=mask_for_metrics)
-                                        ssim_b = compute_ssim(f, r, mask=mask_for_metrics)
+                                        mae_sum += compute_mae(f, r, mask=mask_for_metrics)
+                                        psnr_sum += compute_psnr(f, r, mask=mask_for_metrics)
+                                        ssim_sum += compute_ssim(f, r, mask=mask_for_metrics)
+                                        sample_count += 1.0
                                 except Exception:
                                     # 回退仅计算 MAE
-                                    mae_b = self.MAE(fake_B, real_B)
-                                    psnr_b = 0.0
-                                    ssim_b = 0.0
-
-                                MAE += mae_b
-                                PSNR += psnr_b
-                                SSIM += ssim_b
-                                num += 1
+                                    mae_sum += float(self.MAE(fake_B, real_B))
+                                    sample_count += 1.0
 
                                 # 前端进度
                                 try:
@@ -979,18 +1028,36 @@ class Cyc_Trainer():
                         # 汇总（Sum-Reduce）
                         try:
                             device0 = self.device
-                            t = torch.tensor([MAE, PSNR, SSIM, num], dtype=torch.float64, device=device0)
+                            t = torch.tensor([mae_sum, psnr_sum, ssim_sum, sample_count], dtype=torch.float64, device=device0)
                             t = _reduce_tensor_sum(t)
-                            MAE, PSNR, SSIM, num = [float(x) for x in t.tolist()]
+                            mae_sum, psnr_sum, ssim_sum, sample_count = [float(x) for x in t.tolist()]
                         except Exception:
                             pass
 
-                        val_mae = MAE / max(1.0, num)
-                        val_psnr = PSNR / max(1.0, num)
-                        val_ssim = SSIM / max(1.0, num)
+                        val_mae = mae_sum / max(1.0, sample_count)
+                        val_psnr = psnr_sum / max(1.0, sample_count)
+                        val_ssim = ssim_sum / max(1.0, sample_count)
+
+                        if fid_metric is not None and _is_main_process():
+                            try:
+                                fid_value = float(fid_metric.compute())
+                                fid_metric.reset()
+                            except Exception:
+                                fid_value = None
+                        else:
+                            fid_value = None
+                        if lpips_metric is not None and LPIPS_count > 0:
+                            lpips_value = float(LPIPS_sum / LPIPS_count)
+                        else:
+                            lpips_value = None
 
                         if _is_main_process():
-                            print(f"Val MAE: {val_mae:.6f} | PSNR: {val_psnr:.3f} dB | SSIM: {val_ssim:.4f}")
+                            msg = f"Val MAE: {val_mae:.6f} | PSNR: {val_psnr:.3f} dB | SSIM: {val_ssim:.4f}"
+                            if fid_value is not None:
+                                msg += f" | FID: {fid_value:.4f}"
+                            if lpips_value is not None:
+                                msg += f" | LPIPS: {lpips_value:.6f}"
+                            print(msg)
 
                         # === 采样并上传验证图像到 wandb ===
                         try:
@@ -1058,10 +1125,10 @@ class Cyc_Trainer():
 
                                 if imgs_real and imgs_pred and _is_main_process():
                                     wandb.log({
-                                        f'tables/val_input_A_ep{epoch + 1:04d}': imgs_input,
-                                        f'tables/val_real_B_ep{epoch + 1:04d}': imgs_real,
-                                        f'tables/val_pred_B_ep{epoch + 1:04d}': imgs_pred,
-                                        f'tables/val_mask_keep_ep{epoch + 1:04d}': imgs_mask_keep,
+                                        f'images/val_input_A_ep{epoch + 1:04d}': imgs_input,
+                                        f'images/val_real_B_ep{epoch + 1:04d}': imgs_real,
+                                        f'images/val_pred_B_ep{epoch + 1:04d}': imgs_pred,
+                                        f'images/val_mask_keep_ep{epoch + 1:04d}': imgs_mask_keep,
                                         'epoch': epoch + 1,
                                     })
                         except Exception as e:
@@ -1070,15 +1137,29 @@ class Cyc_Trainer():
                         # === 日志数值指标 ===
                         if _is_main_process():
                             try:
-                                wandb.log({
+                                log_dict = {
                                     'val/MAE': val_mae,
                                     'val/PSNR': val_psnr,
                                     'val/SSIM': val_ssim,
                                     'epoch': epoch + 1,
-                                })
+                                }
+                                if fid_value is not None:
+                                    log_dict['val/FID'] = fid_value
+                                if lpips_value is not None:
+                                    log_dict['val/LPIPS'] = lpips_value
+                                wandb.log(log_dict)
                                 # 同步到 summary 方便排行榜
                                 wandb.run.summary['best/val_MAE'] = min(
                                     float(wandb.run.summary.get('best/val_MAE', float('inf'))), float(val_mae))
+                                wandb.run.summary['latest/val_MAE'] = float(val_mae)
+                                if fid_value is not None:
+                                    best_fid = float(wandb.run.summary.get('best/val_FID', float('inf')))
+                                    wandb.run.summary['best/val_FID'] = float(min(best_fid, fid_value))
+                                    wandb.run.summary['latest/val_FID'] = float(fid_value)
+                                if lpips_value is not None:
+                                    best_lpips = float(wandb.run.summary.get('best/val_LPIPS', float('inf')))
+                                    wandb.run.summary['best/val_LPIPS'] = float(min(best_lpips, lpips_value))
+                                    wandb.run.summary['latest/val_LPIPS'] = float(lpips_value)
                                 try:
                                     wandb.run.summary['val/metrics_use_rd'] = bool(self.val_metrics_use_rd)
                                 except Exception:
@@ -1290,6 +1371,8 @@ class Cyc_Trainer():
                         self.netG_A2B.train()
                     if was_train_R:
                         self.R_A.train()
+
+        self.config['epoch'] = target_epoch
 
     def test(self, ):
         # Ensure device
@@ -2089,3 +2172,100 @@ class Cyc_Trainer():
         gradxy = cv2.addWeighted(tans_x, 0.5, tans_y, 0.5, 0)
 
         cv2.imwrite(root, gradxy)
+
+    def _prepare_val_metrics_modules(self):
+        if not _is_main_process():
+            return None
+        if self._val_metric_support is None:
+            support = {}
+            device = getattr(self, 'device', torch.device('cpu'))
+            try:
+                if FrechetInceptionDistance is not None:
+                    support['fid'] = FrechetInceptionDistance(feature=64, reset_real_features=True).to(device)
+            except Exception as exc:
+                print(f"[val] FID metric init failed: {exc}")
+            try:
+                if LearnedPerceptualImagePatchSimilarity is not None:
+                    support['lpips'] = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+            except Exception as exc:
+                print(f"[val] LPIPS metric init failed: {exc}")
+            self._val_metric_support = support
+        return self._val_metric_support
+
+    @staticmethod
+    def _prepare_images_for_metrics(tensor: torch.Tensor) -> torch.Tensor:
+        img = tensor.detach()
+        if img.ndim != 4:
+            raise ValueError(f"Expected BCHW tensor for metrics, got {img.shape}")
+        if img.shape[1] == 1:
+            img = img.repeat(1, 3, 1, 1)
+        img = torch.clamp((img + 1.0) * 0.5, 0.0, 1.0)
+        return img
+
+    @staticmethod
+    def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
+        return module.module if isinstance(module, DDP) else module
+
+    def get_epoch(self) -> int:
+        return int(self.config.get('epoch', 0))
+
+    def save_checkpoint(self, path: str, extra: Optional[dict] = None):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        state = {
+            'epoch': int(self.config.get('epoch', 0)),
+            'best_val_mae': float(getattr(self, 'best_val_mae', float('inf'))),
+            'config_snapshot': copy.deepcopy(self.config),
+            'netG_A2B': self._unwrap(self.netG_A2B).state_dict(),
+            'optimizer_G': self.optimizer_G.state_dict(),
+            'netD_B': self._unwrap(self.netD_B).state_dict(),
+            'optimizer_D_B': self.optimizer_D_B.state_dict(),
+        }
+        if hasattr(self, 'netG_B2A'):
+            state['netG_B2A'] = self._unwrap(self.netG_B2A).state_dict()
+        if hasattr(self, 'optimizer_D_A'):
+            state['optimizer_D_A'] = self.optimizer_D_A.state_dict()
+        if hasattr(self, 'netD_A'):
+            state['netD_A'] = self._unwrap(self.netD_A).state_dict()
+        if hasattr(self, 'R_A'):
+            state['R_A'] = self._unwrap(self.R_A).state_dict()
+        if hasattr(self, 'optimizer_R_A'):
+            state['optimizer_R_A'] = self.optimizer_R_A.state_dict()
+        if extra:
+            state['extra'] = extra
+        torch.save(state, path)
+
+    def load_checkpoint(self, path: str, strict: bool = True):
+        state = torch.load(path, map_location=self.device)
+        self._unwrap(self.netG_A2B).load_state_dict(state['netG_A2B'])
+        self.optimizer_G.load_state_dict(state['optimizer_G'])
+        self._unwrap(self.netD_B).load_state_dict(state['netD_B'])
+        self.optimizer_D_B.load_state_dict(state['optimizer_D_B'])
+        if hasattr(self, 'netG_B2A') and 'netG_B2A' in state:
+            self._unwrap(self.netG_B2A).load_state_dict(state['netG_B2A'])
+        if hasattr(self, 'netD_A') and 'netD_A' in state:
+            self._unwrap(self.netD_A).load_state_dict(state['netD_A'])
+        if hasattr(self, 'optimizer_D_A') and 'optimizer_D_A' in state:
+            self.optimizer_D_A.load_state_dict(state['optimizer_D_A'])
+        if hasattr(self, 'R_A') and 'R_A' in state:
+            self._unwrap(self.R_A).load_state_dict(state['R_A'])
+        if hasattr(self, 'optimizer_R_A') and 'optimizer_R_A' in state:
+            self.optimizer_R_A.load_state_dict(state['optimizer_R_A'])
+        self.config['epoch'] = int(state.get('epoch', self.config.get('epoch', 0)))
+        self.best_val_mae = float(state.get('best_val_mae', getattr(self, 'best_val_mae', float('inf'))))
+        return state.get('extra')
+
+    def set_rd_weights(self, weights_dir: Optional[str], rd_w_min: Optional[float] = None):
+        if rd_w_min is not None:
+            self.rd_w_min = float(rd_w_min)
+        if weights_dir:
+            self.rd_mode = 'weights'
+            self.rd_input_type = 'weights'
+            self.rd_weights_dir = os.path.abspath(weights_dir)
+        else:
+            self.rd_mode = None
+            self.rd_input_type = None
+            self.rd_weights_dir = ''
+        if hasattr(self, 'train_data') and hasattr(self.train_data, 'dataset') and hasattr(self.train_data.dataset, 'set_rd_config'):
+            self.train_data.dataset.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir, self.rd_w_min)
+        if hasattr(self, 'val_data') and hasattr(self.val_data, 'dataset') and hasattr(self.val_data.dataset, 'set_rd_config'):
+            self.val_data.dataset.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir, self.rd_w_min)

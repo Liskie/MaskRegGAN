@@ -13,7 +13,7 @@ resnet_n_blocks = 1
 
 norm_layer = partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
 align_corners = False
-up_sample_mode = 'bilinear'
+up_sample_mode = 'nearest'
 
 
 def custom_init(m):
@@ -141,7 +141,7 @@ class UpBlock(torch.nn.Module):
             skip_stream = self.attention_gate(down_stream, skip_stream)
         if down_stream_size[2] != skip_stream_size[2] or down_stream_size[3] != skip_stream_size[3]:
             down_stream = F.interpolate(down_stream, (skip_stream_size[2], skip_stream_size[3]),
-                                        mode=up_sample_mode, align_corners=align_corners)
+                                        mode=up_sample_mode)
         x = torch.cat([down_stream, skip_stream], 1)
         x = self.conv_0(x)
         if self.conv_1 is not None:

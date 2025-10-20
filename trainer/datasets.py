@@ -111,6 +111,7 @@ class ImageDataset(Dataset):
         # Compose a stable slice_name and optionally load RD weight/mask
         slice_name = f"{pid}_{sid}" if (pid is not None and sid is not None) else os.path.splitext(os.path.basename(file_B))[0]
         rd_has_file = False
+        body_mask = (item_B != -1).float()
         if self.rd_input_type is not None:
             rd_has_file = rd_file_exists_for_slice(slice_name, self.rd_input_type, self.rd_mask_dir,
                                                    self.rd_weights_dir)
@@ -127,10 +128,14 @@ class ImageDataset(Dataset):
                 w2d = load_weight_or_mask_for_slice(slice_name, tgt, self.rd_input_type, self.rd_mask_dir,
                                                     self.rd_weights_dir, float(self.rd_w_min))
             rd_weight = self._apply_mask_transforms(w2d, affine_params_B, affine_conf_B)
+        else:
+            rd_weight = body_mask
 
         sample = {'A': item_A, 'B': item_B, 'patient_id': pid, 'slice_id': sid}
         if rd_weight is not None:
             sample['rd_weight'] = rd_weight
+        if body_mask is not None:
+            sample['body_mask'] = body_mask
         sample['rd_has_file'] = bool(rd_has_file)
         return sample
 
@@ -191,6 +196,13 @@ class ImageDataset(Dataset):
         shear = tuple(float(s) for s in (shear if isinstance(shear, (tuple, list)) else (0.0, 0.0)))
         return TF.affine(tensor, angle=float(angle), translate=trans, scale=float(scale), shear=shear,
                          interpolation=interp if not is_mask else InterpolationMode.NEAREST, fill=float(fill))
+
+    def set_rd_config(self, rd_input_type=None, rd_mask_dir='', rd_weights_dir='', rd_w_min=0.0):
+        self.rd_input_type = rd_input_type
+        self.rd_mask_dir = rd_mask_dir or ''
+        self.rd_weights_dir = rd_weights_dir or ''
+        self.rd_w_min = float(rd_w_min)
+        self._W_cache = {}
 
 
 
@@ -298,3 +310,10 @@ class ValDataset(Dataset):
         if ten.ndim == 2:
             ten = ten.unsqueeze(0)
         return ten.float()
+
+    def set_rd_config(self, rd_input_type=None, rd_mask_dir='', rd_weights_dir='', rd_w_min=0.0):
+        self.rd_input_type = rd_input_type
+        self.rd_mask_dir = rd_mask_dir or ''
+        self.rd_weights_dir = rd_weights_dir or ''
+        self.rd_w_min = float(rd_w_min)
+        self._W_cache = {}

@@ -92,7 +92,7 @@ class ResUnet(torch.nn.Module):
         conv_num -= 1
         while conv_num > (self.ndown_blocks - self.nup_blocks):
             s = skip_vals['down_{}'.format(conv_num)]
-            x = F.interpolate(x, (s.size(2), s.size(3)), mode='bilinear')
+            x = F.interpolate(x, (s.size(2), s.size(3)), mode='nearest')
             x = torch.cat([x, s], 1)
             x = getattr(self, 'up_{}'.format(conv_num))(x)
             conv_num -= 1
