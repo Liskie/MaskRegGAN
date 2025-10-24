@@ -164,7 +164,10 @@ class ImageDataset(Dataset):
                                                   [H, W])
 
     def _ensure_tensor(self, arr):
-        ten = torch.from_numpy(np.asarray(arr, dtype=np.float32))
+        arr_np = np.asarray(arr, dtype=np.float32)
+        if not arr_np.flags.writeable:
+            arr_np = np.array(arr_np, copy=True)
+        ten = torch.from_numpy(arr_np)
         if ten.ndim == 2:
             ten = ten.unsqueeze(0)
         return ten.float()
@@ -306,7 +309,10 @@ class ValDataset(Dataset):
         return max(len(self.files_A), len(self.files_B))
 
     def _ensure_tensor(self, arr):
-        ten = torch.from_numpy(np.asarray(arr, dtype=np.float32))
+        arr_np = np.asarray(arr, dtype=np.float32)
+        if not arr_np.flags.writeable:
+            arr_np = np.array(arr_np, copy=True)
+        ten = torch.from_numpy(arr_np)
         if ten.ndim == 2:
             ten = ten.unsqueeze(0)
         return ten.float()

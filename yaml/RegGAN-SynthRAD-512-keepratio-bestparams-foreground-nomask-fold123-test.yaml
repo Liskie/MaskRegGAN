@@ -1,0 +1,59 @@
+name: CycleGan
+bidirect: False
+regist: True
+noise_level: 0
+port: 6019
+
+# Paths
+dataroot: data/SynthRAD2023-Task1/test2D-foreground/
+val_dataroot: data/SynthRAD2023-Task1/test2D-foreground/
+save_root: output/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test/test-eval/
+image_save: output/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test/test-eval/images/
+
+
+# Loss weights (kept for compatibility with Cyc_Trainer init)
+Adv_lamda: 1
+Corr_lamda: 20
+Smooth_lamda: 10
+
+# Runtime
+epoch: 0
+n_epochs: 80
+batchSize: 8
+lr: 0.0001
+decay_epoch: 20
+size: 512
+input_nc: 1
+output_nc: 1
+cuda: True
+save_every_n_epochs: 5
+
+# DataLoader
+n_cpu: 2
+dataloader_timeout: 60
+persistent_workers: true
+prefetch_factor: 2
+cache_mode: mmap
+resize_mode: keepratio
+
+# Validation / evaluation
+val_freq: 5
+val_track_enable: false
+eval_with_registration: true
+val_sample_images: 0
+
+# MC settings
+save_uncert_outputs: false
+mc_runs: 1
+mc_mode: input_noise
+mc_input_noise_sigma: 0.02
+
+# Residual detection
+residual_detect: true
+rd_mode: none
+rd_w_min: 0.0
+metrics_use_rd: false
+test_metrics_use_rd: false
+
+test_plot_workers: 8
+

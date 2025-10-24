@@ -1,0 +1,95 @@
+name: CycleGan-cross
+trainer: cross
+bidirect: False
+regist: True
+noise_level: 0
+
+# Paths
+cv_root: data/SynthRAD2023-Task1/cv_folds
+save_root: ./output/SynthRAD-RegGAN-512-keepratio-cross3/
+image_save: ./output/SynthRAD-RegGAN-512-keepratio-cross3/val-images/
+fold_ids: [1, 2, 3]
+cv_gpus: [0, 1, 2]
+stage_epochs: 5
+
+# wandb
+wandb_project: RegGAN
+wandb_run_name: RegGAN-cross3
+wandb_tags: ['SynthRAD2023', '512', 'keepratio', 'cross', 'confidence-weights']
+
+# Loss weights
+Adv_lamda: 1
+Corr_lamda: 20
+Smooth_lamda: 10
+
+# Training schedule
+epoch: 0
+n_epochs: 80
+batchSize: 8
+lr: 0.0001
+decay_epoch: 20
+size: 512
+input_nc: 1
+output_nc: 1
+cuda: True
+save_every_n_epochs: 5
+
+# DataLoader
+n_cpu: 2
+dataloader_timeout: 60
+persistent_workers: true
+prefetch_factor: 2
+cache_mode: mmap
+resize_mode: keepratio
+
+# Validation
+val_freq: 5
+val_track_enable: true
+val_track_fixed_n: 50
+eval_with_registration: true
+val_sample_images: 50
+
+# MC settings
+save_uncert_outputs: false
+mc_runs: 1
+mc_mode: input_noise
+mc_input_noise_sigma: 0.02
+
+# Residual detection
+residual_detect: true
+rd_fdr_q: 0.05
+rd_Tl: 1.8
+rd_seed_smooth_sigma: 1.0
+rd_seed_min_area_frac: 0.0003
+rd_seed_open_r: 1
+rd_seed_percentile: 99.5
+rd_min_area_frac: 0.0005
+rd_bridge_r: 3
+rd_open_r: 2
+rd_close_r: 2
+rd_topk: -1
+rd_seed_dilate: 1
+rd_weight_mode: sigmoid
+rd_weight_alpha: 1.5
+rd_allow_empty: true
+rd_th_seed_hi: 0
+rd_min_highz_pixels: 2
+rd_mode: none
+rd_mask_dir: ''
+rd_weights_dir: ''
+rd_w_min: 0.0
+rd_scan_on_init: false
+metrics_use_rd: false
+test_metrics_use_rd: false
+
+# Confidence weighting defaults
+confidence_thr_low: 0.05
+confidence_thr_high: 0.15
+confidence_gap_max: 0.05
+confidence_w_min: 0.05
+confidence_lambda_if: 1.0
+confidence_lambda_oof: 2.0
+confidence_lambda_gap: 1.0
+confidence_ema_beta: 0.0
+
+test_plot_workers: 8

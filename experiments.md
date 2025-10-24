@@ -112,6 +112,32 @@ python experiment01-deform-field.py \
   --out_dir 'experiment-results/01-deform-field/CycleGAN_noise5/NC+R/df_eval/'
 ```
 
-Can you check my whole project with focus in trainer/CycTrainer.py, trainer/utils.py and
- trainer/datasets.py. I want to know how the ssim is calculated with a mask.
+# Experiment 04-2 - Cross Training Test
+```shell
+CUDA_VISIBLE_DEVICES=3 python experiment04-2-cross-training-test.py \
+    --config yaml/RegGAN-SynthRAD-cross3-test.yaml \
+    --fold-root output/SynthRAD-RegGAN-512-keepratio-cross3/fold_01 \
+    --fold-root output/SynthRAD-RegGAN-512-keepratio-cross3/fold_02 \
+    --fold-root output/SynthRAD-RegGAN-512-keepratio-cross3/fold_03 \
+    --mode both \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --output output/SynthRAD-RegGAN-512-keepratio-cross3/test-eval/cross_eval_summary.json
 
+CUDA_VISIBLE_DEVICES=3 python experiment04-2-cross-training-test.py \
+    --config yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test.yaml \
+    --fold-root output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-fold1 \
+    --fold-root output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-fold2 \
+    --fold-root output/SynthRAD-RegGAN-512-keepratio-bestparams-foreground-nomask-fold3 \
+    --mode both \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --output output/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test/test-eval/cross_eval_summary.json
+```
+
+# Train RegGAN - Fusion mode
+```shell
+python train.py --config yaml/RegGAN-SynthRAD-fusion3.yaml
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SynthRAD-fusion3.yaml
+```

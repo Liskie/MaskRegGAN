@@ -1,5 +1,5 @@
 import argparse
-from trainer import Cyc_Trainer, CycTrainerCross, Nice_Trainer, P2p_Trainer, Munit_Trainer, Unit_Trainer
+from trainer import Cyc_Trainer, CycTrainerCross, Nice_Trainer, P2p_Trainer, Munit_Trainer, Unit_Trainer, Cyc_Trainer_Fusion
 import yaml
 
 
@@ -17,6 +17,8 @@ def main():
     trainer_kind = config.get('trainer')
     if trainer_kind == 'cross':
         trainer = CycTrainerCross(config)
+    elif trainer_kind == 'fusion':
+        trainer = Cyc_Trainer_Fusion(config)
     elif config['name'] == 'CycleGan':
         trainer = Cyc_Trainer(config)
     elif config['name'] == 'Munit':
