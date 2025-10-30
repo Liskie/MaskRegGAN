@@ -1,5 +1,5 @@
 from .CycTrainer import Cyc_Trainer
-from .CycTrainerFusion import Cyc_Trainer_Fusion
+from .CycTrainerFusion import CycTrainerFusion
 from .CycTrainerCross import CycTrainerCross, CrossCycleTrainer
 from .NiceTrainer import Nice_Trainer
 from .p2pTrainer import P2p_Trainer

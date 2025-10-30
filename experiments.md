@@ -122,7 +122,8 @@ CUDA_VISIBLE_DEVICES=3 python experiment04-2-cross-training-test.py \
     --mode both \
     --compute-fid --fid-feature 64 \
     --compute-lpips --lpips-net vgg \
-    --output output/SynthRAD-RegGAN-512-keepratio-cross3/test-eval/cross_eval_summary.json
+    --output output/SynthRAD-RegGAN-512-keepratio-cross3/test-eval/cross_eval_summary.json \
+    --fig-dir output/SynthRAD-RegGAN-512-keepratio-cross3/test-eval/fig
 
 CUDA_VISIBLE_DEVICES=3 python experiment04-2-cross-training-test.py \
     --config yaml/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test.yaml \
@@ -132,7 +133,8 @@ CUDA_VISIBLE_DEVICES=3 python experiment04-2-cross-training-test.py \
     --mode both \
     --compute-fid --fid-feature 64 \
     --compute-lpips --lpips-net vgg \
-    --output output/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test/test-eval/cross_eval_summary.json
+    --output output/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test/test-eval/cross_eval_summary.json \
+    --fig-dir output/RegGAN-SynthRAD-512-keepratio-bestparams-foreground-nomask-fold123-test/test-eval/fig
 ```
 
 # Train RegGAN - Fusion mode
@@ -140,4 +142,43 @@ CUDA_VISIBLE_DEVICES=3 python experiment04-2-cross-training-test.py \
 python train.py --config yaml/RegGAN-SynthRAD-fusion3.yaml
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SynthRAD-fusion3.yaml
+```
+
+# Test RegGAN - Fusion mode
+```shell
+CUDA_VISIBLE_DEVICES=0 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SynthRAD-fusion3.yaml \
+      --weights output/SynthRAD-RegGAN-fusion3/NC+R/netG_A2B.pth \
+      --reg-weights output/SynthRAD-RegGAN-fusion3/NC+R/R_A.pth \
+      --data-root data/SynthRAD2023-Task1/test2D-foreground/ \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/SynthRAD-RegGAN-fusion3/test-eval/figs \
+      --output output/SynthRAD-RegGAN-fusion3/test-eval/summary.json
+
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SynthRAD-fusion3.yaml \
+      --weights output/SynthRAD-RegGAN-fusion3/NC+R/best.pth \
+      --reg-weights output/SynthRAD-RegGAN-fusion3/NC+R/best.pth \
+      --data-root data/SynthRAD2023-Task1/test2D-foreground/ \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/SynthRAD-RegGAN-fusion3/test-eval/figs \
+      --output output/SynthRAD-RegGAN-fusion3/test-eval/summary.json
+      
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SynthRAD-fusion3.yaml \
+      --weights output/SynthRAD-RegGAN-fusion3/NC+R/best.pth \
+      --reg-weights output/SynthRAD-RegGAN-fusion3/NC+R/best.pth \
+      --data-root data/SynthRAD2023-Task1/test2D-foreground/ \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --output output/SynthRAD-RegGAN-fusion3/test-eval/summary.json
+```
+
+# Train RegGAN - Fusion mode with split from body
+```shell
+python train.py --config yaml/RegGAN-SynthRAD-fusion3-headsplit.yaml
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SynthRAD-fusion3-headsplit.yaml
 ```

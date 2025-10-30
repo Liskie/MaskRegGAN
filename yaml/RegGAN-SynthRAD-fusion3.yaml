@@ -34,7 +34,7 @@ image_save: './output/SynthRAD-RegGAN-fusion3/NC+R/img/'
 # Optimisation
 epoch: 0
 n_epochs: 80
-batchSize: 4
+batchSize: 3
 lr: 0.0001
 decay_epoch: 20
 size: 512

@@ -19,7 +19,6 @@ import cv2
 from PIL import Image as PILImage
 import torch
 from torch.utils.data import DataLoader
-import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from contextlib import nullcontext
@@ -49,111 +48,16 @@ from .datasets import ImageDataset, ValDataset
 from .reg import Reg
 from .transformer import Transformer_2D
 from models.CycleGan import *
-
-
-
-def _dist_is_available_and_initialized():
-    return dist.is_available() and dist.is_initialized()
-
-def _get_world_size():
-    return dist.get_world_size() if _dist_is_available_and_initialized() else 1
-
-def _get_rank():
-    return dist.get_rank() if _dist_is_available_and_initialized() else 0
-
-def _is_main_process():
-    return _get_rank() == 0
-
-def _setup_ddp_if_needed(config):
-    """
-    根据环境变量（torchrun 设置的 WORLD_SIZE/LOCAL_RANK）决定是否启用 DDP。
-    config['ddp']=False 可强制关闭。
-    """
-    use_ddp = bool(config.get('ddp', True))
-    if not use_ddp:
-        return False, 0
-    world_size_env = int(os.environ.get('WORLD_SIZE', '1'))
-    if world_size_env <= 1:
-        return False, 0
-    if not dist.is_initialized():
-        dist.init_process_group(backend='nccl', init_method='env://')
-    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
-    torch.cuda.set_device(local_rank)
-    return True, local_rank
-
-def _reduce_tensor_sum(t: torch.Tensor) -> torch.Tensor:
-    if not _dist_is_available_and_initialized():
-        return t
-    dist.all_reduce(t, op=dist.ReduceOp.SUM)
-    return t
-
-def _enable_mc_dropout(module: torch.nn.Module):
-    for m in module.modules():
-        if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d, nn.AlphaDropout)):
-            m.train()  # activate dropout during inference
-
-
-# --- Lightweight timer context for profiling ---
-class _Timer:
-    def __init__(self, name, prof_dict):
-        self.name = name
-        self.prof = prof_dict
-
-    def __enter__(self):
-        self.t0 = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        t1 = time.perf_counter()
-        self.prof[self.name] += (t1 - self.t0)
-
-
-class LogRange:
-    def __init__(self, tag: str):
-        self.tag = tag
-
-    def __call__(self, x):
-        try:
-            if isinstance(x, torch.Tensor):
-                vmin = float(x.min().item())
-                vmax = float(x.max().item())
-                dtype = str(x.dtype)
-                shape = tuple(x.shape)
-            elif isinstance(x, np.ndarray):
-                vmin = float(np.min(x))
-                vmax = float(np.max(x))
-                dtype = str(x.dtype)
-                shape = x.shape
-            elif isinstance(x, PILImage.Image):
-                arr = np.array(x)
-                vmin = float(arr.min())
-                vmax = float(arr.max())
-                dtype = f"PIL[{x.mode}]/{arr.dtype}"
-                shape = arr.shape
-            else:
-                dtype = type(x).__name__
-                shape = getattr(x, 'size', None)
-                vmin = float('nan')
-                vmax = float('nan')
-            print(f"[{self.tag}] type={type(x).__name__} shape={shape} dtype={dtype} min={vmin:.6g} max={vmax:.6g}",
-                  flush=True)
-        except Exception as e:
-            print(f"[{self.tag}] (failed to compute stats: {e})", flush=True)
-        return x
-
-
-class ToPILWithLog:
-    def __init__(self, tag: str = "ToPILImage"):
-        self._op = ToPILImage()
-        self._before = LogRange(f"before {tag}")
-        self._after = LogRange(f"after {tag}")
-
-    def __call__(self, x):
-        self._before(x)
-        y = self._op(x)
-        self._after(y)
-        return y
-
+from .common_utils import _Timer
+from .distrib_utils import (
+    _dist_is_available_and_initialized,
+    _get_world_size,
+    _get_rank,
+    _is_main_process,
+    _setup_ddp_if_needed,
+    _reduce_tensor_sum,
+    _enable_mc_dropout,
+)
 
 class Cyc_Trainer():
     def __init__(self, config):
@@ -164,7 +68,8 @@ class Cyc_Trainer():
         self._wandb_settings = self._build_wandb_settings(config)
         self._progress_disable = bool(config.get('disable_progress', False))
         ## def networks
-        self.netG_A2B = Generator(config['input_nc'], config['output_nc']).cuda()
+        upsample_mode = str(config.get('generator_upsample_mode', 'resize')).lower()
+        self.netG_A2B = Generator(config['input_nc'], config['output_nc'], upsample_mode=upsample_mode).cuda()
         self.netD_B = Discriminator(config['input_nc']).cuda()
         self.optimizer_D_B = torch.optim.Adam(self.netD_B.parameters(), lr=config['lr'], betas=(0.5, 0.999))
 
@@ -173,7 +78,7 @@ class Cyc_Trainer():
             self.spatial_transform = Transformer_2D().cuda()
             self.optimizer_R_A = torch.optim.Adam(self.R_A.parameters(), lr=config['lr'], betas=(0.5, 0.999))
         if config['bidirect']:
-            self.netG_B2A = Generator(config['input_nc'], config['output_nc']).cuda()
+            self.netG_B2A = Generator(config['input_nc'], config['output_nc'], upsample_mode=upsample_mode).cuda()
             self.netD_A = Discriminator(config['input_nc']).cuda()
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A2B.parameters(), self.netG_B2A.parameters()),
                                                 lr=config['lr'], betas=(0.5, 0.999))

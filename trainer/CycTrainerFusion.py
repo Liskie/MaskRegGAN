@@ -52,31 +52,61 @@ from .datasets import ImageDataset, ValDataset
 from .reg import Reg
 from .transformer import Transformer_2D
 from models.CycleGan import Generator as BaseGenerator, Discriminator
+from .common_utils import _Timer
+from .distrib_utils import (
+    _dist_is_available_and_initialized,
+    _get_world_size,
+    _get_rank,
+    _is_main_process,
+    _setup_ddp_if_needed,
+    _reduce_tensor_sum,
+    _enable_mc_dropout,
+)
+from .confidence_utils import compute_weight_map
 
 
 class SharedBackboneGenerator(nn.Module):
     """Shared trunk + per-fold head CycleGAN generator."""
 
-    def __init__(self, input_nc: int, output_nc: int, n_residual_blocks: int = 9, n_heads: int = 3):
+    def __init__(
+        self,
+        input_nc: int,
+        output_nc: int,
+        n_residual_blocks: int = 9,
+        n_heads: int = 3,
+        upsample_mode: str = "resize",
+        share_body: bool = True,
+    ):
         super().__init__()
         if n_heads <= 0:
             raise ValueError("n_heads must be > 0")
         self.input_nc = input_nc
         self.output_nc = output_nc
         self.n_heads = n_heads
+        self.share_body = bool(share_body)
 
         # Instantiate baseline generator to reuse architecture layout
-        base = BaseGenerator(input_nc, output_nc, n_residual_blocks=n_residual_blocks)
+        base = BaseGenerator(input_nc, output_nc, n_residual_blocks=n_residual_blocks, upsample_mode=upsample_mode)
         self.shared_head = base.model_head
-        self.shared_body = base.model_body
+        self.shared_body = base.model_body if self.share_body else None
 
-        # Build per-head upsampling tails (deep copy of base tail)
+        # Build per-head branches (deep copies of required components)
         self.heads = nn.ModuleList()
         for _ in range(n_heads):
-            self.heads.append(copy.deepcopy(base.model_tail))
+            if self.share_body:
+                branch = copy.deepcopy(base.model_tail)
+            else:
+                branch = nn.Sequential(
+                    copy.deepcopy(base.model_body),
+                    copy.deepcopy(base.model_tail),
+                )
+            self.heads.append(branch)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.shared_body(self.shared_head(x))
+        feats = self.shared_head(x)
+        if self.share_body and self.shared_body is not None:
+            feats = self.shared_body(feats)
+        return feats
 
     def decode(self, feats: torch.Tensor, head_idx: int) -> torch.Tensor:
         if head_idx < 0 or head_idx >= self.n_heads:
@@ -95,167 +125,7 @@ class SharedBackboneGenerator(nn.Module):
         return outputs
 
 
-def _residual_to_confidence(residual: np.ndarray, thr_low: float, thr_high: float) -> np.ndarray:
-    conf = np.ones_like(residual, dtype=np.float32)
-    if thr_high <= thr_low:
-        return conf
-    mask_high = residual >= thr_high
-    mask_low = residual <= thr_low
-    mid = (~mask_high) & (~mask_low)
-    conf[mask_high] = 0.0
-    if np.any(mid):
-        conf[mid] = 1.0 - ((residual[mid] - thr_low) / (thr_high - thr_low))
-    return np.clip(conf, 0.0, 1.0)
-
-
-def _harmonic_mean(stack: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    if stack.ndim == 2:
-        return stack
-    denom = np.sum(1.0 / np.clip(stack, eps, 1.0), axis=0)
-    return stack.shape[0] / np.clip(denom, eps, None)
-
-
-def _compute_weight_map(
-    r_oof: np.ndarray,
-    r_if_stack: List[np.ndarray],
-    gap_max: float,
-    thr_low: float,
-    thr_high: float,
-    w_min: float,
-    lam_if: float,
-    lam_oof: float,
-    lam_gap: float,
-) -> Dict[str, np.ndarray]:
-    r_if = np.stack(r_if_stack, axis=0)
-    r_if_mean = np.mean(r_if, axis=0)
-    gap = r_oof - r_if_mean
-    gap_norm = np.clip(gap / max(gap_max, 1e-6), 0.0, 1.0)
-    c_gap = 1.0 - gap_norm
-    c_oof = _residual_to_confidence(r_oof, thr_low, thr_high)
-    c_if_components = [_residual_to_confidence(r, thr_low, thr_high) for r in r_if_stack]
-    c_if = _harmonic_mean(np.stack(c_if_components, axis=0))
-    total_lambda = max(lam_if + lam_oof + lam_gap, 1e-6)
-    c_bar = (lam_if * c_if + lam_oof * c_oof + lam_gap * c_gap) / total_lambda
-    weights = w_min + (1.0 - w_min) * c_bar
-    max_if = np.max(r_if, axis=0)
-    min_if = np.min(r_if, axis=0)
-    rule1 = (np.maximum(max_if, r_oof) < thr_low) & (gap < gap_max)
-    rule3 = (r_oof >= thr_high) & (min_if >= thr_high)
-    weights = np.where(rule1, 1.0, weights)
-    weights = np.where(rule3, 0.0, weights)
-    return {
-        "weights": weights.astype(np.float32),
-        "c_if": c_if.astype(np.float32),
-        "c_oof": c_oof.astype(np.float32),
-        "c_gap": c_gap.astype(np.float32),
-        "gap": gap.astype(np.float32),
-        "r_if_mean": r_if_mean.astype(np.float32),
-    }
-
-def _dist_is_available_and_initialized():
-    return dist.is_available() and dist.is_initialized()
-
-def _get_world_size():
-    return dist.get_world_size() if _dist_is_available_and_initialized() else 1
-
-def _get_rank():
-    return dist.get_rank() if _dist_is_available_and_initialized() else 0
-
-def _is_main_process():
-    return _get_rank() == 0
-
-def _setup_ddp_if_needed(config):
-    """
-    根据环境变量（torchrun 设置的 WORLD_SIZE/LOCAL_RANK）决定是否启用 DDP。
-    config['ddp']=False 可强制关闭。
-    """
-    use_ddp = bool(config.get('ddp', True))
-    if not use_ddp:
-        return False, 0
-    world_size_env = int(os.environ.get('WORLD_SIZE', '1'))
-    if world_size_env <= 1:
-        return False, 0
-    if not dist.is_initialized():
-        dist.init_process_group(backend='nccl', init_method='env://')
-    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
-    torch.cuda.set_device(local_rank)
-    return True, local_rank
-
-def _reduce_tensor_sum(t: torch.Tensor) -> torch.Tensor:
-    if not _dist_is_available_and_initialized():
-        return t
-    dist.all_reduce(t, op=dist.ReduceOp.SUM)
-    return t
-
-def _enable_mc_dropout(module: torch.nn.Module):
-    for m in module.modules():
-        if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d, nn.AlphaDropout)):
-            m.train()  # activate dropout during inference
-
-
-# --- Lightweight timer context for profiling ---
-class _Timer:
-    def __init__(self, name, prof_dict):
-        self.name = name
-        self.prof = prof_dict
-
-    def __enter__(self):
-        self.t0 = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        t1 = time.perf_counter()
-        self.prof[self.name] += (t1 - self.t0)
-
-
-class LogRange:
-    def __init__(self, tag: str):
-        self.tag = tag
-
-    def __call__(self, x):
-        try:
-            if isinstance(x, torch.Tensor):
-                vmin = float(x.min().item())
-                vmax = float(x.max().item())
-                dtype = str(x.dtype)
-                shape = tuple(x.shape)
-            elif isinstance(x, np.ndarray):
-                vmin = float(np.min(x))
-                vmax = float(np.max(x))
-                dtype = str(x.dtype)
-                shape = x.shape
-            elif isinstance(x, PILImage.Image):
-                arr = np.array(x)
-                vmin = float(arr.min())
-                vmax = float(arr.max())
-                dtype = f"PIL[{x.mode}]/{arr.dtype}"
-                shape = arr.shape
-            else:
-                dtype = type(x).__name__
-                shape = getattr(x, 'size', None)
-                vmin = float('nan')
-                vmax = float('nan')
-            print(f"[{self.tag}] type={type(x).__name__} shape={shape} dtype={dtype} min={vmin:.6g} max={vmax:.6g}",
-                  flush=True)
-        except Exception as e:
-            print(f"[{self.tag}] (failed to compute stats: {e})", flush=True)
-        return x
-
-
-class ToPILWithLog:
-    def __init__(self, tag: str = "ToPILImage"):
-        self._op = ToPILImage()
-        self._before = LogRange(f"before {tag}")
-        self._after = LogRange(f"after {tag}")
-
-    def __call__(self, x):
-        self._before(x)
-        y = self._op(x)
-        self._after(y)
-        return y
-
-
-class Cyc_Trainer_Fusion():
+class CycTrainerFusion:
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -269,9 +139,8 @@ class Cyc_Trainer_Fusion():
             raise ValueError("fusion_heads must be positive")
         if config.get('bidirect', False):
             raise ValueError("CycTrainerFusion does not support bidirectional setup (bidirect must be False)")
-        self._fusion_default_head = int(config.get('fusion_default_head', 0))
-        if not (0 <= self._fusion_default_head < self.n_heads):
-            self._fusion_default_head = 0
+        # default head is no longer used; every patient must be mapped explicitly
+        self._fusion_default_head = None
         self._cv_root = config.get('cv_root')
         self._fold_assignments: Dict[str, int] = {}
         self._fold_id_lookup: Dict[int, int] = {}
@@ -285,6 +154,8 @@ class Cyc_Trainer_Fusion():
             config['output_nc'],
             n_residual_blocks=config.get('fusion_residual_blocks', 9),
             n_heads=self.n_heads,
+            upsample_mode=str(config.get('generator_upsample_mode', 'resize')).lower(),
+            share_body=bool(config.get('fusion_share_body', True)),
         ).cuda()
         self.netD_B = Discriminator(config['input_nc']).cuda()
         self.optimizer_D_B = torch.optim.Adam(self.netD_B.parameters(), lr=config['lr'], betas=(0.5, 0.999))
@@ -344,7 +215,8 @@ class Cyc_Trainer_Fusion():
 
         # === Validation metrics masking (val-time) ===
         # Defaults to metrics_use_rd if unspecified
-        self.metrics_use_rd = bool(config.get('metrics_use_rd', False)) if not hasattr(self, 'metrics_use_rd') else self.metrics_use_rd
+        self.metrics_use_rd = bool(config.get('metrics_use_rd', False)) if not hasattr(self,
+                                                                                       'metrics_use_rd') else self.metrics_use_rd
         self.val_metrics_use_rd = bool(config.get('val_metrics_use_rd', config.get('metrics_use_rd', False)))
         self.val_save_keep_masks = bool(config.get('val_save_keep_masks', False))
         self.val_keep_masks_dir = None
@@ -522,8 +394,12 @@ class Cyc_Trainer_Fusion():
                             if isinstance(scan_limit, int) and scan_limit > 0 and i >= scan_limit:
                                 break
                         return count
-                tr_cnt = _count_with_progress(self.train_data.dataset, 'train') if hasattr(self, 'train_data') and hasattr(self.train_data, 'dataset') else 0
-                print(f"[init] mask/weight presence → train: {tr_cnt} / {len(self.train_data.dataset) if hasattr(self.train_data, 'dataset') else '?'}")
+
+                tr_cnt = _count_with_progress(self.train_data.dataset, 'train') if hasattr(self,
+                                                                                           'train_data') and hasattr(
+                    self.train_data, 'dataset') else 0
+                print(
+                    f"[init] mask/weight presence → train: {tr_cnt} / {len(self.train_data.dataset) if hasattr(self.train_data, 'dataset') else '?'}")
             else:
                 print("[init] mask-count scan skipped (rd_scan_on_init=False)")
         except Exception as e:
@@ -536,24 +412,38 @@ class Cyc_Trainer_Fusion():
         self.best_val_mae = float('inf')
         self.best_ckpt_path = os.path.join(self.config.get('save_root', './'), 'best.pth')
         # How many validation samples to upload to wandb (images)
-        self.val_sample_images = int(self.config.get('val_sample_images', 50))  # 0 = disable, default 50
+        self.val_sample_images = max(0, int(self.config.get('val_sample_images', 50)))  # legacy total-cap semantics
+        # Optional explicit per-head override; when >0 we sample this many slices per head
+        self.val_sample_images_per_head = max(0, int(self.config.get('val_sample_images_per_head', 0)))
 
         # Fixed validation tracking (log the same K triplets every validation)
         self.val_track_enable = bool(self.config.get('val_track_enable', True))
-        self.val_track_fixed_n = int(self.config.get('val_track_fixed_n', 50))
+        self.val_track_fixed_n = max(0, int(self.config.get('val_track_fixed_n', 50)))
+        self.val_track_per_head = max(0, int(self.config.get('val_track_per_head', 0)))
         try:
             ds_len = sum(len(ds) for ds in self.fold_val_datasets.values())
         except Exception:
             ds_len = 0
-        combined = []
-        for fold_id in sorted(self.fold_val_datasets.keys()):
-            ds = self.fold_val_datasets[fold_id]
-            for idx in range(len(ds)):
-                combined.append((fold_id, idx))
-        k = max(0, min(self.val_track_fixed_n, len(combined)))
-        self.val_track_indices = combined[:k]
-        if self.val_track_enable and k > 0:
-            print(f"[val-track] Tracking {k} fixed validation samples each eval.")
+        self.val_track_indices: List = []
+        total_tracked = 0
+        per_head_limit = 0
+        if self.val_track_per_head > 0:
+            per_head_limit = self.val_track_per_head
+        elif self.val_track_fixed_n > 0:
+            per_head_limit = max(1, int(math.ceil(self.val_track_fixed_n / max(1, self.n_heads))))
+
+        if per_head_limit > 0 and self.val_track_enable:
+            for fold_id in sorted(self.fold_val_datasets.keys()):
+                ds = self.fold_val_datasets[fold_id]
+                head_limit = min(per_head_limit, len(ds))
+                for idx in range(head_limit):
+                    self.val_track_indices.append((fold_id, idx))
+                total_tracked += head_limit
+            if total_tracked > 0:
+                per_head_msg = f"up to {per_head_limit}"
+                print(f"[val-track] Tracking {per_head_msg} samples per head (total {total_tracked}) each eval.")
+        elif self.val_track_enable and self.val_track_fixed_n == 0 and self.val_track_per_head == 0:
+            print("[val-track] Tracking disabled (0 samples requested).")
 
         # Cache initial configuration snapshot for logging/reporting
         self._config_snapshots['init'] = self._effective_config_snapshot(stage='init')
@@ -570,7 +460,6 @@ class Cyc_Trainer_Fusion():
         self._run_tag = self.config.get('run_tag', datetime.now().strftime("%Y%m%d-%H%M%S"))
         self._val_metric_support = None
 
-
     # ------------------------------------------------------------------
     # Fusion helpers
     # ------------------------------------------------------------------
@@ -580,51 +469,15 @@ class Cyc_Trainer_Fusion():
             return None
         base = os.path.basename(str(name))
         stem, _ = os.path.splitext(base)
+        # Handle pattern like 1PA054.nii_z0000
+        if ".nii_" in stem:
+            prefix, suffix = stem.split(".nii_", 1)
+            if suffix.startswith("z") and suffix[1:].isdigit():
+                return prefix
         parts = stem.split('_', 1)
         if len(parts) == 2:
             return parts[0]
         return stem
-
-    def _load_fold_manifest(self, cv_root: str) -> Dict[str, int]:
-        mapping: Dict[str, int] = {}
-        if not cv_root:
-            return mapping
-        try:
-            entries = sorted(
-                (d for d in os.scandir(cv_root) if d.is_dir() and d.name.lower().startswith('fold_')),
-                key=lambda d: d.name
-            )
-        except FileNotFoundError:
-            print(f"[fusion] cv_root '{cv_root}' not found; proceeding without fold assignments.")
-            return mapping
-        except Exception as exc:
-            print(f"[fusion] Failed to scan cv_root '{cv_root}': {exc}")
-            return mapping
-
-        for entry in entries:
-            try:
-                fold_index_raw = int(entry.name.split('_')[-1])
-                fold_idx = fold_index_raw
-            except Exception:
-                continue
-            manifest_path = os.path.join(entry.path, 'manifest.txt')
-            ids: List[str] = []
-            if os.path.exists(manifest_path):
-                try:
-                    with open(manifest_path, 'r') as fh:
-                        manifest = yaml.safe_load(fh)
-                    if isinstance(manifest, dict):
-                        for key in ('train', 'val', 'holdout', 'oof', 'validation'):
-                            section = manifest.get(key)
-                            if isinstance(section, list):
-                                ids.extend(str(pid) for pid in section)
-                    elif isinstance(manifest, list):
-                        ids.extend(str(pid) for pid in manifest)
-                except Exception as exc:
-                    print(f"[fusion] Warning: failed to parse {manifest_path}: {exc}")
-            for pid in ids:
-                mapping[str(pid)] = fold_idx
-        return mapping
 
     def _finalize_fold_assignments(self, cv_root: Path):
         assignments: Dict[str, int] = {}
@@ -633,15 +486,6 @@ class Cyc_Trainer_Fusion():
             for pid in patients:
                 assignments[str(pid)] = head_idx
 
-        # Supplement with manifest information if available
-        manifest_map = self._load_fold_manifest(str(cv_root)) if cv_root else {}
-        for pid, raw_idx in manifest_map.items():
-            head_idx = self._fold_id_lookup.get(raw_idx)
-            if head_idx is not None:
-                assignments[str(pid)] = head_idx
-            elif pid not in assignments:
-                assignments[str(pid)] = self._fusion_default_head
-
         self._fold_assignments = assignments
         if assignments:
             summary = defaultdict(int)
@@ -649,6 +493,21 @@ class Cyc_Trainer_Fusion():
                 summary[int(head_idx)] += 1
             try:
                 print(f"[fusion] Fold assignment counts: {dict(summary)}")
+                head_patients = {head: sorted(list(pids)) for head, pids in self._fold_val_patients.items()}
+                max_len = max((len(pids) for pids in head_patients.values()), default=0)
+                if max_len > 0:
+                    header = "index".ljust(6)
+                    for head in range(self.n_heads):
+                        header += f"head_{head}".ljust(14)
+                    print("[fusion] Fold membership table:")
+                    print("[fusion] " + header)
+                    for idx in range(max_len):
+                        row = f"{idx:<6}"
+                        for head in range(self.n_heads):
+                            patients = head_patients.get(head, [])
+                            pid = patients[idx] if idx < len(patients) else ""
+                            row += pid.ljust(14)
+                        print("[fusion] " + row)
             except Exception:
                 pass
 
@@ -668,9 +527,11 @@ class Cyc_Trainer_Fusion():
             except Exception:
                 pid_val = None
             pid_str = str(pid_val) if pid_val is not None else None
-            fid = self._fold_assignments.get(pid_str, self._fusion_default_head)
+            if pid_str not in self._fold_assignments:
+                raise KeyError(f"Patient '{pid_str}' missing fold assignment; check manifests/val directories.")
+            fid = self._fold_assignments[pid_str]
             if fid < 0 or fid >= self.n_heads:
-                fid = self._fusion_default_head
+                raise ValueError(f"Fold assignment {fid} for patient '{pid_str}' is out of range [0,{self.n_heads}).")
             folds.append(int(fid))
         return folds
 
@@ -729,7 +590,7 @@ class Cyc_Trainer_Fusion():
             r_if_stack = [residuals[h] for h in residuals.keys() if h != fold]
             if not r_if_stack:
                 r_if_stack = [r_oof]
-            result = _compute_weight_map(
+            result = compute_weight_map(
                 r_oof=r_oof,
                 r_if_stack=r_if_stack,
                 gap_max=cfg['gap_max'],
@@ -800,7 +661,8 @@ class Cyc_Trainer_Fusion():
             if self.config.get('val_enable_lpips', True):
                 lpips_metric = val_metrics_modules.get('lpips')
 
-        use_reg = bool(self.config.get('eval_with_registration', False) and hasattr(self, 'R_A') and hasattr(self, 'spatial_transform'))
+        use_reg = bool(self.config.get('eval_with_registration', False) and hasattr(self, 'R_A') and hasattr(self,
+                                                                                                             'spatial_transform'))
         reg_net = self._unwrap(self.R_A) if use_reg else None
         spat = self.spatial_transform if use_reg else None
 
@@ -825,6 +687,7 @@ class Cyc_Trainer_Fusion():
 
         heads_all = sorted(self.fold_val_loaders.keys()) or list(range(self.n_heads))
         processed = 0
+
         def _save_val_keep_mask(slice_name: str, mask_arr):
             if not self.val_keep_masks_dir:
                 return
@@ -953,7 +816,6 @@ class Cyc_Trainer_Fusion():
     def _generator_module(self) -> SharedBackboneGenerator:
         return self._unwrap(self.netG_A2B)
 
-
     # ------------------------------------------------------------------
     # Helper utilities for configuration reporting / logging
     # ------------------------------------------------------------------
@@ -989,7 +851,8 @@ class Cyc_Trainer_Fusion():
             'rd_cache_weights': bool(self.config.get('rd_cache_weights', False)),
             'metrics_use_rd': bool(self.config.get('metrics_use_rd', False)),
             'val_metrics_use_rd': bool(self.config.get('val_metrics_use_rd', self.config.get('metrics_use_rd', False))),
-            'test_metrics_use_rd': bool(self.config.get('test_metrics_use_rd', self.config.get('metrics_use_rd', False))),
+            'test_metrics_use_rd': bool(
+                self.config.get('test_metrics_use_rd', self.config.get('metrics_use_rd', False))),
             'fusion_confidence': bool(self.config.get('fusion_confidence', False)),
             'fusion_confidence_dir': self.config.get('fusion_confidence_dir', ''),
             'val_enable_fid': bool(self.config.get('val_enable_fid', True)),
@@ -1039,7 +902,6 @@ class Cyc_Trainer_Fusion():
                 print(str(snap))
             self._config_logged_stages.add(stage)
         return snap
-
 
     def train(self, max_epochs: Optional[int] = None):
 
@@ -1101,19 +963,19 @@ class Cyc_Trainer_Fusion():
             self.netD_B = self.netD_B.to(self.device)
             if ddp_enabled:
                 self.netD_B = DDP(self.netD_B, device_ids=[self.local_rank], output_device=self.local_rank,
-                                   find_unused_parameters=False)
+                                  find_unused_parameters=False)
 
         if getattr(self.config, 'bidirect', False) or self.config.get('bidirect', False):
             if hasattr(self, 'netG_B2A') and isinstance(self.netG_B2A, torch.nn.Module):
                 self.netG_B2A = self.netG_B2A.to(self.device)
                 if ddp_enabled:
                     self.netG_B2A = DDP(self.netG_B2A, device_ids=[self.local_rank], output_device=self.local_rank,
-                                         find_unused_parameters=False)
+                                        find_unused_parameters=False)
             if hasattr(self, 'netD_A') and isinstance(self.netD_A, torch.nn.Module):
                 self.netD_A = self.netD_A.to(self.device)
                 if ddp_enabled:
                     self.netD_A = DDP(self.netD_A, device_ids=[self.local_rank], output_device=self.local_rank,
-                                       find_unused_parameters=False)
+                                      find_unused_parameters=False)
 
         # Attach DistributedSampler by rebuilding the DataLoaders (do not set sampler post-init)
         if ddp_enabled:
@@ -1164,8 +1026,11 @@ class Cyc_Trainer_Fusion():
         if _is_main_process():
             try:
                 ds_len = len(self.train_data.dataset)
-                smp_len = len(self.train_data.sampler) if hasattr(self.train_data, 'sampler') and self.train_data.sampler is not None else ds_len
-                print(f"[DDP] world_size={_get_world_size()} dataset={ds_len} per-rank-samples={smp_len} batch_size={self.train_data.batch_size} per-rank-batches={len(self.train_data)}", flush=True)
+                smp_len = len(self.train_data.sampler) if hasattr(self.train_data,
+                                                                  'sampler') and self.train_data.sampler is not None else ds_len
+                print(
+                    f"[DDP] world_size={_get_world_size()} dataset={ds_len} per-rank-samples={smp_len} batch_size={self.train_data.batch_size} per-rank-batches={len(self.train_data)}",
+                    flush=True)
             except Exception:
                 pass
 
@@ -1217,9 +1082,10 @@ class Cyc_Trainer_Fusion():
                 else:
                     task_batches = None
                 # === Epoch-level loss aggregators (to log average train loss per epoch) ===
-                ep_sums = defaultdict(float)   # name -> summed loss over the epoch
-                ep_counts = defaultdict(int)   # name -> number of times this loss was available
+                ep_sums = defaultdict(float)  # name -> summed loss over the epoch
+                ep_counts = defaultdict(int)  # name -> number of times this loss was available
                 n_batches_this_epoch = 0
+
                 def _ep_acc(name, val):
                     if val is None:
                         return
@@ -1229,6 +1095,7 @@ class Cyc_Trainer_Fusion():
                         return
                     ep_sums[name] += v
                     ep_counts[name] += 1
+
                 for i, batch in enumerate(self.train_data):
 
                     # Initialize loss holders to ensure safe logging even if a branch is skipped
@@ -1341,8 +1208,8 @@ class Cyc_Trainer_Fusion():
                             head_pred_fake = self.netD_B(fake_sel)
                             head_pred_real = self.netD_B(real_B_sel)
                             loss_head = self.config['Adv_lamda'] * (
-                                self.MSE_loss(head_pred_fake, torch.zeros_like(head_pred_fake)) +
-                                self.MSE_loss(head_pred_real, torch.ones_like(head_pred_real))
+                                    self.MSE_loss(head_pred_fake, torch.zeros_like(head_pred_fake)) +
+                                    self.MSE_loss(head_pred_real, torch.ones_like(head_pred_real))
                             )
                         loss_D_components.append(loss_head)
                         loss_D_logs.append(loss_head.detach())
@@ -1360,21 +1227,31 @@ class Cyc_Trainer_Fusion():
                     _ep_acc('total', total_loss)
                     _ep_acc('D_B', loss_D_B)
                     _ep_acc('SR', SR_loss)
-                    _ep_acc('adv',   adv_loss)
+                    _ep_acc('adv', adv_loss)
                     _ep_acc('smooth', SM_loss)
                     # Log losses every 50 batches, including breakdown components
                     if i % 50 == 0:
                         log_losses = {}
                         if total_loss is not None:
-                            log_losses['loss/total'] = float(total_loss.item()) if isinstance(total_loss, torch.Tensor) else float(total_loss)
+                            log_losses['loss/total'] = float(total_loss.item()) if isinstance(total_loss,
+                                                                                              torch.Tensor) else float(
+                                total_loss)
                         if loss_D_B is not None:
-                            log_losses['loss/D_B'] = float(loss_D_B.item()) if isinstance(loss_D_B, torch.Tensor) else float(loss_D_B)
+                            log_losses['loss/D_B'] = float(loss_D_B.item()) if isinstance(loss_D_B,
+                                                                                          torch.Tensor) else float(
+                                loss_D_B)
                         if SR_loss is not None:
-                            log_losses['loss/SR'] = float(SR_loss.item()) if isinstance(SR_loss, torch.Tensor) else float(SR_loss)
+                            log_losses['loss/SR'] = float(SR_loss.item()) if isinstance(SR_loss,
+                                                                                        torch.Tensor) else float(
+                                SR_loss)
                         if adv_loss is not None:
-                            log_losses['loss/adv'] = float(adv_loss.item()) if isinstance(adv_loss, torch.Tensor) else float(adv_loss)
+                            log_losses['loss/adv'] = float(adv_loss.item()) if isinstance(adv_loss,
+                                                                                          torch.Tensor) else float(
+                                adv_loss)
                         if SM_loss is not None:
-                            log_losses['loss/smooth'] = float(SM_loss.item()) if isinstance(SM_loss, torch.Tensor) else float(SM_loss)
+                            log_losses['loss/smooth'] = float(SM_loss.item()) if isinstance(SM_loss,
+                                                                                            torch.Tensor) else float(
+                                SM_loss)
                         if log_losses:
                             self.logger.log_step(log_losses)
                     # advance inner progress
@@ -1384,7 +1261,8 @@ class Cyc_Trainer_Fusion():
                         pass
                     # also update the epoch task with fractional progress so ETA is meaningful
                     try:
-                        if progress is not None and task_epochs is not None and isinstance(total_batches, int) and total_batches > 0:
+                        if progress is not None and task_epochs is not None and isinstance(total_batches,
+                                                                                           int) and total_batches > 0:
                             # completed epochs so far + fractional within this epoch
                             frac = (i + 1) / float(total_batches)
                             progress.update(task_epochs, completed=(epoch - start_epoch) + frac)
@@ -1417,7 +1295,7 @@ class Cyc_Trainer_Fusion():
                 # Save model checkpoints (periodic + non-conflicting filenames)
                 if _is_main_process():
                     should_save = (isinstance(save_every_n, int) and save_every_n > 0 and (
-                                (epoch + 1) % save_every_n == 0))
+                            (epoch + 1) % save_every_n == 0))
                     # Also ensure we save the last epoch even if it doesn't align with the cadence
                     if not should_save and (epoch + 1) == total_epochs:
                         should_save = True
@@ -1454,7 +1332,8 @@ class Cyc_Trainer_Fusion():
                         was_train_R = self.R_A.training
                         self.R_A.eval()
 
-                    val_mae, val_psnr, val_ssim, fid_value, lpips_value, residual_cache = self._collect_validation_metrics(epoch)
+                    val_mae, val_psnr, val_ssim, fid_value, lpips_value, residual_cache = self._collect_validation_metrics(
+                        epoch)
 
                     if was_train_G:
                         self.netG_A2B.train()
@@ -1471,42 +1350,45 @@ class Cyc_Trainer_Fusion():
 
                         # === 采样并上传验证图像到 wandb ===
                         try:
-                            if self.val_sample_images and self.val_sample_images > 0:
-                                imgs_input = []
-                                imgs_real = []
-                                imgs_pred = []
-                                imgs_mask_keep = []
+                            sample_cap_total = self.val_sample_images
+                            per_head_limit = 0
+                            if self.val_sample_images_per_head > 0:
+                                per_head_limit = self.val_sample_images_per_head
+                            elif sample_cap_total > 0:
+                                per_head_limit = max(1, int(math.ceil(sample_cap_total / max(1, self.n_heads))))
+                            if per_head_limit > 0:
+                                imgs_input: List[wandb.Image] = []
+                                imgs_real: List[wandb.Image] = []
+                                imgs_pred: List[wandb.Image] = []
+                                imgs_pred_pre: List[wandb.Image] = []
+                                per_head_counts: Dict[int, int] = {}
                                 with torch.no_grad():
                                     for fold_id, loader in self.fold_val_loaders.items():
+                                        collected = 0
                                         for batch_val in loader:
                                             real_Av = batch_val['A'].to(self.device, non_blocking=True)
                                             real_Bv = batch_val['B'].to(self.device, non_blocking=True)
                                             preds = self.netG_A2B(real_Av, head_indices=[fold_id])
                                             pred_Bv = preds[fold_id]
+                                            pred_pre = pred_Bv
+                                            if bool(self.config.get('eval_with_registration', False)) and hasattr(self,
+                                                                                                                  'R_A') and hasattr(
+                                                    self, 'spatial_transform'):
+                                                flow = self.R_A(pred_Bv, real_Bv)
+                                                pred_Bv = self.spatial_transform(pred_Bv, flow)
                                             Bnow = real_Bv.shape[0]
-                                            k = min(self.val_sample_images - len(imgs_real), Bnow)
-                                            if k <= 0:
+                                            if Bnow <= 0:
+                                                continue
+                                            remaining = max(0, per_head_limit - collected)
+                                            if remaining <= 0:
                                                 break
-                                            idxs = random.sample(range(Bnow), k)
-                                            w_batch = batch_val.get('rd_weight', None)
-                                            if isinstance(w_batch, torch.Tensor):
-                                                w_batch = w_batch.detach().cpu().numpy()
+                                            k = min(remaining, Bnow)
+                                            idxs = random.sample(range(Bnow), k) if Bnow > 1 and k < Bnow else list(
+                                                range(k))
                                             for idx in idxs:
                                                 Ab = real_Av[idx].detach().cpu().numpy().squeeze()
                                                 rb = real_Bv[idx].detach().cpu().numpy().squeeze()
                                                 pb = pred_Bv[idx].detach().cpu().numpy().squeeze()
-                                                try:
-                                                    body = (rb != -1).astype(np.uint8)
-                                                    if w_batch is not None:
-                                                        w2d = np.squeeze(w_batch[idx]).astype(np.float32)
-                                                        if w2d.shape != rb.shape:
-                                                            w2d = cv2.resize(w2d, (rb.shape[1], rb.shape[0]), interpolation=cv2.INTER_NEAREST)
-                                                        w2d = np.clip(w2d, 0.0, 1.0)
-                                                        keep_vis = (w2d * body * 255.0).astype(np.uint8)
-                                                    else:
-                                                        keep_vis = (body * 255).astype(np.uint8)
-                                                except Exception:
-                                                    keep_vis = ((rb != -1).astype(np.uint8) * 255)
 
                                                 def _to_uint8(a):
                                                     a = np.squeeze(a)
@@ -1517,25 +1399,37 @@ class Cyc_Trainer_Fusion():
                                                     if amin >= -1.001 and amax <= 1.001:
                                                         a = ((a + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
                                                     else:
-                                                        a = ((a - amin) / (amax - amin + 1e-6) * 255.0).clip(0, 255).astype(np.uint8)
+                                                        a = ((a - amin) / (amax - amin + 1e-6) * 255.0).clip(0,
+                                                                                                             255).astype(
+                                                            np.uint8)
                                                     return a
 
                                                 imgs_input.append(wandb.Image(_to_uint8(Ab)))
                                                 imgs_real.append(wandb.Image(_to_uint8(rb)))
-                                                imgs_pred.append(wandb.Image(_to_uint8(pb)))
-                                                imgs_mask_keep.append(wandb.Image(keep_vis))
-                                            if len(imgs_real) >= self.val_sample_images:
+                                                imgs_pred.append(
+                                                    wandb.Image(_to_uint8(pb), caption=f"head {fold_id} reg"))
+                                                imgs_pred_pre.append(wandb.Image(
+                                                    _to_uint8(pred_pre[idx].detach().cpu().numpy().squeeze()),
+                                                    caption=f"head {fold_id} pre"))
+                                                collected += 1
+                                            if collected >= per_head_limit:
                                                 break
-                                        if len(imgs_real) >= self.val_sample_images:
-                                            break
+                                        per_head_counts[fold_id] = collected
+                                        if collected == 0:
+                                            print(
+                                                f"[wandb] warning: head {fold_id} yielded 0 samples for val image logging",
+                                                flush=True)
                                 if imgs_real and imgs_pred and _is_main_process():
-                                    wandb.log({
+                                    log_payload = {
                                         f'images/val_input_A_ep{epoch + 1:04d}': imgs_input,
                                         f'images/val_real_B_ep{epoch + 1:04d}': imgs_real,
                                         f'images/val_pred_B_ep{epoch + 1:04d}': imgs_pred,
-                                        f'images/val_mask_keep_ep{epoch + 1:04d}': imgs_mask_keep,
+                                        f'images/val_pred_B_preReg_ep{epoch + 1:04d}': imgs_pred_pre,
                                         'epoch': epoch + 1,
-                                    })
+                                    }
+                                    for head_idx, count in per_head_counts.items():
+                                        log_payload[f'val/image_samples/head_{head_idx}'] = int(count)
+                                    wandb.log(log_payload)
                                     if _is_main_process() and self.config.get('val_debug_log', False):
                                         print("[val-debug] wandb image upload complete", flush=True)
                         except Exception as e:
@@ -1613,7 +1507,6 @@ class Cyc_Trainer_Fusion():
                                     "rd_weight",
                                     "keep_w2d",
                                     "body_mask",
-                                    "body_fuzzy",
                                     "rd_source_exclude",
                                 ])
                                 # eval mode
@@ -1634,7 +1527,7 @@ class Cyc_Trainer_Fusion():
                                     pid = sample.get('patient_id', None)
                                     sid = sample.get('slice_id', None)
                                     sid_str = f"{pid}_{sid}" if (
-                                                pid is not None and sid is not None) else f"fold{fold_id}_idx{sample_idx:05d}"
+                                            pid is not None and sid is not None) else f"fold{fold_id}_idx{sample_idx:05d}"
                                     # To CUDA batch
                                     if isinstance(A, np.ndarray):
                                         A = torch.from_numpy(A)
@@ -1677,8 +1570,9 @@ class Cyc_Trainer_Fusion():
                                                 keep_array = np.clip(w.astype(np.float32), 0.0, 1.0)
                                                 w_min, w_max = float(np.min(keep_array)), float(np.max(keep_array))
                                                 if w_max > w_min:
-                                                    w_vis = ((keep_array - w_min) / (w_max - w_min + 1e-6) * 255.0).clip(0,
-                                                                                                                        255).astype(
+                                                    w_vis = ((keep_array - w_min) / (
+                                                                w_max - w_min + 1e-6) * 255.0).clip(0,
+                                                                                                    255).astype(
                                                         np.uint8)
                                                 else:
                                                     w_vis = np.zeros_like(keep_array, dtype=np.uint8)
@@ -1727,11 +1621,8 @@ class Cyc_Trainer_Fusion():
                                     # 记录 keep 权重与 body mask 的可视化
                                     keep_img = None
                                     body_img = None
-                                    body_fuzzy_img = None
                                     try:
                                         body_img = wandb.Image((body_mask * 255).astype(np.uint8), caption="body")
-                                        body_fuzzy = (np.abs(body_arr + 1.0) < 5e-3).astype(np.uint8)
-                                        body_fuzzy_img = wandb.Image((body_fuzzy * 255).astype(np.uint8), caption="body_fuzzy")
                                         if keep_array is not None:
                                             if keep_array.shape != body_mask.shape:
                                                 try:
@@ -1748,7 +1639,6 @@ class Cyc_Trainer_Fusion():
                                             )
                                     except Exception:
                                         body_img = None
-                                        body_fuzzy_img = None
                                         keep_img = None
 
                                     # Convert to uint8
@@ -1769,11 +1659,10 @@ class Cyc_Trainer_Fusion():
                                         sid_str,
                                         wandb.Image(_to_uint8(A_np), caption=f"{sid_str}: input"),
                                         wandb.Image(_to_uint8(B_np), caption=f"{sid_str}: truth"),
-                                        wandb.Image(_to_uint8(P_np), caption=f"{sid_str}: pred"),
+                                        wandb.Image(_to_uint8(P_np), caption=f"{sid_str}: head {fold_id} pred"),
                                         W_img,
                                         keep_img,
                                         body_img,
-                                        body_fuzzy_img,
                                         raw_rd_mask,
                                     )
                                 if _is_main_process():
@@ -1876,7 +1765,10 @@ class Cyc_Trainer_Fusion():
         plot_workers = int(self.config.get('test_plot_workers', 0))
 
         # Whether to use RD masks/weights for metrics during test (foreground minus misalignment area)
-        test_metrics_use_rd = bool(self.config.get('test_metrics_use_rd', self.config.get('val_metrics_use_rd', self.config.get('metrics_use_rd', False))))
+        test_metrics_use_rd = bool(self.config.get('test_metrics_use_rd', self.config.get('val_metrics_use_rd',
+                                                                                          self.config.get(
+                                                                                              'metrics_use_rd',
+                                                                                              False))))
         if _is_main_process():
             print(f"[test] metrics_use_rd={bool(test_metrics_use_rd)} (mask = foreground − misalignment)")
 
@@ -1906,7 +1798,8 @@ class Cyc_Trainer_Fusion():
             per_slice_values = {}  # key: slice_name -> {'mae':[], 'psnr':[], 'ssim':[]}
 
             # Run composites out-of-process to avoid Matplotlib GIL contention
-            plot_executor = ProcessPoolExecutor(max_workers=plot_workers) if (plot_workers > 0 and save_composite) else None
+            plot_executor = ProcessPoolExecutor(max_workers=plot_workers) if (
+                        plot_workers > 0 and save_composite) else None
             plot_futures = []
             plot_progress = None
             plot_task_id = None
@@ -2632,7 +2525,8 @@ class Cyc_Trainer_Fusion():
             if self.config.get('val_enable_lpips', True):
                 try:
                     if LearnedPerceptualImagePatchSimilarity is not None:
-                        support['lpips'] = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+                        support['lpips'] = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(
+                            device)
                 except Exception as exc:
                     print(f"[val] LPIPS metric init failed: {exc}")
             self._val_metric_support = support
@@ -2711,8 +2605,10 @@ class Cyc_Trainer_Fusion():
             self.rd_mode = None
             self.rd_input_type = None
             self.rd_weights_dir = ''
-        if hasattr(self, 'train_data') and hasattr(self.train_data, 'dataset') and hasattr(self.train_data.dataset, 'set_rd_config'):
-            self.train_data.dataset.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir, self.rd_w_min)
+        if hasattr(self, 'train_data') and hasattr(self.train_data, 'dataset') and hasattr(self.train_data.dataset,
+                                                                                           'set_rd_config'):
+            self.train_data.dataset.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir,
+                                                  self.rd_w_min)
         if hasattr(self, 'fold_val_datasets'):
             for ds in self.fold_val_datasets.values():
                 if hasattr(ds, 'set_rd_config'):

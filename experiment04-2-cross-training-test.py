@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -133,10 +134,26 @@ def load_generator(
         state = state["state_dict"]
     elif isinstance(state, dict) and "netG_A2B" in state:
         state = state["netG_A2B"]
-    net = Generator(config["input_nc"], config["output_nc"]).to(device)
-    net.load_state_dict(state)
-    net.eval()
-    return net
+    preferred_mode = str(config.get("generator_upsample_mode", "resize")).lower()
+    tried_modes = []
+    last_err: Optional[Exception] = None
+    for mode in ([preferred_mode] + (["deconv"] if preferred_mode != "deconv" else [])):
+        tried_modes.append(mode)
+        net = Generator(config["input_nc"], config["output_nc"], upsample_mode=mode).to(device)
+        try:
+            net.load_state_dict(state)
+            if mode != preferred_mode:
+                print(
+                    f"[warn] Loaded generator '{weight_name}' for {fold_dir.name} using legacy upsample_mode='{mode}'."
+                )
+            net.eval()
+            return net
+        except RuntimeError as err:
+            last_err = err
+    tried = ", ".join(tried_modes)
+    raise RuntimeError(
+        f"Failed to load generator weights from {path} with upsample modes [{tried}]."
+    ) from last_err
 
 
 def load_registration(
@@ -241,6 +258,7 @@ def run_inference(
     reg_name: str,
     ensemble: Optional[EnsembleAccumulator],
     metrics_use_rd: bool,
+    viz_store: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
 ) -> Dict:
     generator = load_generator(fold_dir, config, device, generator_name)
     reg_net, transformer = load_registration(fold_dir, config, device, reg_name)
@@ -316,6 +334,11 @@ def run_inference(
                 slice_name = compose_slice_name(batch, batch_idx, b)
                 real_2d = squeeze_hw(real_np[b])
                 fake_2d = squeeze_hw(fake_np[b])
+                if viz_store is not None:
+                    entry = viz_store.setdefault(slice_name, {})
+                    entry.setdefault("input", squeeze_hw(batch["A"].detach().cpu().numpy()[b]))
+                    entry.setdefault("target", real_2d)
+                    entry[fold_dir.name] = fake_2d
                 keep_mask = None
                 if metrics_use_rd:
                     keep_mask = build_keep_mask(real_2d, rd_weight_np, b)
@@ -443,6 +466,59 @@ def compute_ensemble_metrics(
     return metrics
 
 
+def _slice_to_display(arr: np.ndarray) -> np.ndarray:
+    a = np.asarray(arr, dtype=np.float32)
+    if a.ndim != 2:
+        a = np.squeeze(a)
+    return a
+
+
+def save_slice_figure(
+    slice_name: str,
+    entry: Dict[str, np.ndarray],
+    fold_order: List[str],
+    out_dir: Path,
+) -> None:
+    input_img = _slice_to_display(entry["input"])
+    target_img = _slice_to_display(entry["target"])
+    preds = []
+    for name in fold_order:
+        preds.append(_slice_to_display(entry[name]))
+    avg_img = np.mean(np.stack(preds, axis=0), axis=0).astype(np.float32)
+    images = [input_img, target_img] + preds + [avg_img]
+    titles = ["Input", "Target"] + [f"{name} pred" for name in fold_order] + ["Average"]
+    vmin, vmax = -1.0, 1.0
+    fig, axes = plt.subplots(1, len(images), figsize=(3 * len(images), 3), constrained_layout=True)
+    for ax, img, title in zip(axes, images, titles):
+        ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax)
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+    out_path = out_dir / f"{slice_name}.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def save_visualizations(
+    entries: Dict[str, Dict[str, np.ndarray]],
+    fold_order: List[str],
+    out_dir: Path,
+) -> int:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for slice_name in sorted(entries.keys()):
+        entry = entries[slice_name]
+        missing = [name for name in fold_order if name not in entry]
+        if missing:
+            print(f"[warn] skipping {slice_name}: missing predictions from {missing}")
+            continue
+        if "input" not in entry or "target" not in entry:
+            print(f"[warn] skipping {slice_name}: missing input/target reference")
+            continue
+        save_slice_figure(slice_name, entry, fold_order, out_dir)
+        saved += 1
+    return saved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cross-trained model evaluation utility.")
     parser.add_argument("--config", required=True, help="Path to evaluation config YAML.")
@@ -500,6 +576,11 @@ def main() -> None:
         choices=("alex", "vgg", "squeeze"),
         help="Backbone network for LPIPS (default: vgg).",
     )
+    parser.add_argument(
+        "--fig-dir",
+        default=None,
+        help="Directory to save per-slice visualization panels (input/target/predictions/average).",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -511,6 +592,7 @@ def main() -> None:
     config["_compute_lpips"] = bool(args.compute_lpips)
     config["_lpips_net"] = str(args.lpips_net)
     fold_dirs = parse_fold_dirs(config, args.fold_roots)
+    fold_names = [fold_dir.name for fold_dir in fold_dirs]
     loader = build_eval_loader(config)
     metrics_use_rd = bool(
         config.get(
@@ -520,6 +602,12 @@ def main() -> None:
     )
     need_ensemble = args.mode in ("ensemble", "both")
     accumulator = EnsembleAccumulator(expected_models=len(fold_dirs)) if need_ensemble else None
+    viz_entries: Optional[Dict[str, Dict[str, np.ndarray]]] = None
+    fig_dir: Optional[Path] = None
+    if args.fig_dir:
+        fig_dir = Path(args.fig_dir).expanduser().resolve()
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        viz_entries = {}
     fold_results = []
     for fold_dir in fold_dirs:
         print(f"[info] Evaluating fold at {fold_dir} ...")
@@ -532,6 +620,7 @@ def main() -> None:
             reg_name=args.reg_name,
             ensemble=accumulator,
             metrics_use_rd=metrics_use_rd,
+            viz_store=viz_entries,
         )
         fold_results.append(res)
     summary: Dict[str, Dict] = {}
@@ -584,6 +673,9 @@ def main() -> None:
             f"PSNR={ensemble_summary['psnr']:.4f}, "
             f"SSIM={ensemble_summary['ssim']:.4f}{extra_ens_txt}"
         )
+    if fig_dir is not None and viz_entries is not None:
+        saved = save_visualizations(viz_entries, fold_names, fig_dir)
+        print(f"\nSaved {saved} slice visualizations to {fig_dir}")
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)

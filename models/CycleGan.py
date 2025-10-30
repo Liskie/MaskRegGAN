@@ -22,8 +22,12 @@ class ResidualBlock(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, input_nc, output_nc, n_residual_blocks=9):
+    def __init__(self, input_nc, output_nc, n_residual_blocks=9, upsample_mode: str = "resize"):
         super(Generator, self).__init__()
+        upsample_mode = str(upsample_mode).lower()
+        if upsample_mode not in {"resize", "deconv"}:
+            raise ValueError(f"Unsupported upsample_mode '{upsample_mode}' (expected 'resize' or 'deconv').")
+        self.upsample_mode = upsample_mode
 
         # Initial convolution block
         model_head = [nn.ReflectionPad2d(3),
@@ -50,9 +54,20 @@ class Generator(nn.Module):
         model_tail = []
         out_features = in_features // 2
         for _ in range(2):
-            model_tail += [nn.ConvTranspose2d(in_features, out_features, 3, stride=2, padding=1, output_padding=1),
-                           nn.InstanceNorm2d(out_features),
-                           nn.ReLU(inplace=True)]
+            if self.upsample_mode == "deconv":
+                model_tail += [
+                    nn.ConvTranspose2d(in_features, out_features, 3, stride=2, padding=1, output_padding=1),
+                    nn.InstanceNorm2d(out_features),
+                    nn.ReLU(inplace=True),
+                ]
+            else:
+                model_tail += [
+                    nn.Upsample(scale_factor=2, mode='nearest'),
+                    nn.ReflectionPad2d(1),
+                    nn.Conv2d(in_features, out_features, 3),
+                    nn.InstanceNorm2d(out_features),
+                    nn.ReLU(inplace=True),
+                ]
             in_features = out_features
             out_features = in_features // 2
 
