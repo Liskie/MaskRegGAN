@@ -181,4 +181,216 @@ CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
 python train.py --config yaml/RegGAN-SynthRAD-fusion3-headsplit.yaml
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SynthRAD-fusion3-headsplit.yaml
+
+# Add noise (affine deformation)
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SynthRAD-noise5-fusion3-headsplit.yaml
+```
+
+# Test RegGAN - Fusion mode with split from body
+```shell
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SynthRAD-fusion3-headsplit.yaml \
+      --weights output/SynthRAD-RegGAN-fusion3-headsplit/NC+R/best.pth \
+      --reg-weights output/SynthRAD-RegGAN-fusion3-headsplit/NC+R/best.pth \
+      --data-root data/SynthRAD2023-Task1/test2D-foreground/ \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/SynthRAD-RegGAN-fusion3-headsplit/test-eval/figs \
+      --output output/SynthRAD-RegGAN-fusion3-headsplit/test-eval/summary.json
+
+# Add noise (affine deformation)
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SynthRAD-noise5-fusion3-headsplit.yaml \
+      --weights output/SynthRAD-noise5-RegGAN-fusion3-headsplit/NC+R/best.pth \
+      --reg-weights output/SynthRAD-noise5-RegGAN-fusion3-headsplit/NC+R/best.pth \
+      --data-root data/SynthRAD2023-Task1/test2D-foreground/ \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/SynthRAD-noise5-RegGAN-fusion3-headsplit/test-eval/figs \
+      --output output/SynthRAD-noise5-RegGAN-fusion3-headsplit/test-eval/summary.json
+```
+
+# Train RegGAN - Fusion mode with split from body CT2MR
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SynthRAD-CT2MR-fusion3-headsplit.yaml
+```
+
+# Test RegGAN - Fusion mode with split from body CT2MR
+```shell
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SynthRAD-CT2MR-fusion3-headsplit.yaml \
+      --weights output/SynthRAD-RegGAN-CT2MR-fusion3-headsplit/NC+R/best.pth \
+      --reg-weights output/SynthRAD-RegGAN-CT2MR-fusion3-headsplit/NC+R/best.pth \
+      --data-root data/SynthRAD2023-Task1-CT2MR/test2D-foreground/ \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/SynthRAD-RegGAN-CT2MR-fusion3-headsplit/test-eval/figs \
+      --output output/SynthRAD-RegGAN-CT2MR-fusion3-headsplit/test-eval/summary.json
+```
+
+# Train RegGAN on SAROPT - Fusion mode with split from body 
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SAROPT-fusion3-headsplit.yaml
+```
+
+# Train RegGAN on SAROPT SAR2OPT - Fusion mode with split from body 
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-SAROPT-SAR2OPT-fusion3-headsplit.yaml
+```
+
+# Test RegGAN on SAROPT SAR2OPT - Fusion mode with split from body
+```shell
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-SAROPT-SAR2OPT-fusion3-headsplit.yaml \
+      --weights output/SAROPT-SAR2OPT-RegGAN-fusion3-headsplit/NC+R/best.pth \
+      --reg-weights output/SAROPT-SAR2OPT-RegGAN-fusion3-headsplit/NC+R/best.pth \
+      --data-root data/QXSLAB_SAROPT/test \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/SAROPT-SAR2OPT-RegGAN-fusion3-headsplit/test-eval/figs \
+      --output output/SAROPT-SAR2OPT-RegGAN-fusion3-headsplit/test-eval/summary.json
+```
+
+# Train RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body 
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-headsplit.yaml
+```
+
+# Test RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body
+```shell
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-headsplit.yaml \
+      --weights output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit/NC+R/netG_A2B.pth \
+      --reg-weights output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit/NC+R/R_A.pth \
+      --data-root data/VIPL-MumoFace-2000-merged/test \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit/test-eval/figs \
+      --output output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit/test-eval/summary.json
+```
+
+# Train RegGAN on OuluCASIA NIR2VIS - Fusion mode with split from body 
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-OuluCASIA-Q3-fusion3.yaml
+```
+
+# Test RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body
+```shell
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-OuluCASIA-Q1-fusion3.yaml \
+      --weights output/OuluCASIA-Q1-RegGAN-fusion3/NC+R/netG_A2B.pth \
+      --reg-weights output/OuluCASIA-Q1-RegGAN-fusion3/NC+R/R_A.pth \
+      --data-root data/Oulu-CASIA-FE/test/all \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-workers 32 \
+      --fig-dir output/OuluCASIA-Q1-RegGAN-fusion3/test-eval/figs \
+      --output output/OuluCASIA-Q1-RegGAN-fusion3/test-eval/summary.json
+
+CUDA_VISIBLE_DEVICES=2 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-OuluCASIA-Q2-fusion3.yaml \
+      --weights output/OuluCASIA-Q2-RegGAN-fusion3/NC+R/netG_A2B.pth \
+      --reg-weights output/OuluCASIA-Q2-RegGAN-fusion3/NC+R/R_A.pth \
+      --data-root data/Oulu-CASIA-FE/test/all \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-workers 32 \
+      --fig-dir output/OuluCASIA-Q2-RegGAN-fusion3/test-eval/figs \
+      --output output/OuluCASIA-Q2-RegGAN-fusion3/test-eval/summary.json
+      
+CUDA_VISIBLE_DEVICES=1 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-OuluCASIA-Q3-fusion3.yaml \
+      --weights output/OuluCASIA-Q3-RegGAN-fusion3/NC+R/netG_A2B.pth \
+      --reg-weights output/OuluCASIA-Q3-RegGAN-fusion3/NC+R/R_A.pth \
+      --data-root data/Oulu-CASIA-FE/test/all \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-workers 32 \
+      --fig-dir output/OuluCASIA-Q3-RegGAN-fusion3/test-eval/figs \
+      --output output/OuluCASIA-Q3-RegGAN-fusion3/test-eval/summary.json
+      
+CUDA_VISIBLE_DEVICES=0 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-OuluCASIA-Q4-fusion3.yaml \
+      --weights output/OuluCASIA-Q4-RegGAN-fusion3/NC+R/netG_A2B.pth \
+      --reg-weights output/OuluCASIA-Q4-RegGAN-fusion3/NC+R/R_A.pth \
+      --data-root data/Oulu-CASIA-FE/test/all \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-workers 32 \
+      --fig-dir output/OuluCASIA-Q4-RegGAN-fusion3/test-eval/figs \
+      --output output/OuluCASIA-Q4-RegGAN-fusion3/test-eval/summary.json
+      
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-OuluCASIA-Q5-fusion3.yaml \
+      --weights output/OuluCASIA-Q5-RegGAN-fusion3/NC+R/netG_A2B.pth \
+      --reg-weights output/OuluCASIA-Q5-RegGAN-fusion3/NC+R/R_A.pth \
+      --data-root data/Oulu-CASIA-FE/test/all \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-workers 32 \
+      --fig-dir output/OuluCASIA-Q5-RegGAN-fusion3/test-eval/figs \
+      --output output/OuluCASIA-Q5-RegGAN-fusion3/test-eval/summary.json
+```
+
+# Basic RegGAN
+```shell
+python train.py --config yaml/RegGANBasic-NIRVIS-NIR2RGB.yaml
+python test.py --config yaml/RegGANBasic-NIRVIS-NIR2RGB.yaml
+
+CUDA_VISIBLE_DEVICES=1 python test.py --config yaml/RegGANBasic-OuluCASIA-Q1.yaml
+
+python experiment06-basic-training-test.py \
+    --config yaml/RegGANBasic-OuluCASIA-Q1.yaml \
+    --weights ./output/OuluCASIA-Q1-RegGAN-basic/NC+R/netG_A2B.pth \
+    --reg-weights ./output/OuluCASIA-Q1-RegGAN-basic/NC+R/R_A.pth \
+    --data-root data/Oulu-CASIA-FE/test/all \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --fig-dir ./output/OuluCASIA-Q1-RegGAN-basic/test-eval/figs \
+    --output ./output/OuluCASIA-Q1-RegGAN-basic/test-eval/summary.json \
+    --fig-workers 4
+    
+python experiment06-basic-training-test.py \
+    --config yaml/RegGANBasic-OuluCASIA-Q2.yaml \
+    --weights ./output/OuluCASIA-Q2-RegGAN-basic/NC+R/netG_A2B.pth \
+    --reg-weights ./output/OuluCASIA-Q2-RegGAN-basic/NC+R/R_A.pth \
+    --data-root data/Oulu-CASIA-FE/test/all \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --fig-dir ./output/OuluCASIA-Q2-RegGAN-basic/test-eval/figs \
+    --output ./output/OuluCASIA-Q2-RegGAN-basic/test-eval/summary.json \
+    --fig-workers 4
+
+python experiment06-basic-training-test.py \
+    --config yaml/RegGANBasic-OuluCASIA-Q3.yaml \
+    --weights ./output/OuluCASIA-Q3-RegGAN-basic/NC+R/netG_A2B.pth \
+    --reg-weights ./output/OuluCASIA-Q3-RegGAN-basic/NC+R/R_A.pth \
+    --data-root data/Oulu-CASIA-FE/test/all \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --fig-dir ./output/OuluCASIA-Q3-RegGAN-basic/test-eval/figs \
+    --output ./output/OuluCASIA-Q3-RegGAN-basic/test-eval/summary.json \
+    --fig-workers 4
+
+python experiment06-basic-training-test.py \
+    --config yaml/RegGANBasic-OuluCASIA-Q4.yaml \
+    --weights ./output/OuluCASIA-Q4-RegGAN-basic/NC+R/netG_A2B.pth \
+    --reg-weights ./output/OuluCASIA-Q4-RegGAN-basic/NC+R/R_A.pth \
+    --data-root data/Oulu-CASIA-FE/test/all \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --fig-dir ./output/OuluCASIA-Q4-RegGAN-basic/test-eval/figs \
+    --output ./output/OuluCASIA-Q4-RegGAN-basic/test-eval/summary.json \
+    --fig-workers 4
+
+python experiment06-basic-training-test.py \
+    --config yaml/RegGANBasic-OuluCASIA-Q5.yaml \
+    --weights ./output/OuluCASIA-Q5-RegGAN-basic/NC+R/netG_A2B.pth \
+    --reg-weights ./output/OuluCASIA-Q5-RegGAN-basic/NC+R/R_A.pth \
+    --data-root data/Oulu-CASIA-FE/test/all \
+    --compute-fid --fid-feature 64 \
+    --compute-lpips --lpips-net vgg \
+    --fig-dir ./output/OuluCASIA-Q5-RegGAN-basic/test-eval/figs \
+    --output ./output/OuluCASIA-Q5-RegGAN-basic/test-eval/summary.json \
+    --fig-workers 4
 ```

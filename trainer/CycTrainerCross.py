@@ -83,6 +83,9 @@ def _build_eval_loader(config: Dict, root_dir: Path) -> DataLoader:
         rd_w_min=0.0,
         cache_mode=config.get("cache_mode", "mmap"),
         rd_cache_weights=config.get("rd_cache_weights", False),
+        domain_a_channels=config.get('domain_a_channels', config.get('input_nc')),
+        domain_b_channels=config.get('domain_b_channels', config.get('output_nc')),
+        rd_fallback_mode=config.get('rd_fallback_mode', 'body'),
     )
     n_workers = int(config.get("n_cpu", 0))
     kwargs = dict(

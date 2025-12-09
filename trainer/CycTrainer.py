@@ -67,6 +67,7 @@ class Cyc_Trainer():
         self._config_logged_stages = set()
         self._wandb_settings = self._build_wandb_settings(config)
         self._progress_disable = bool(config.get('disable_progress', False))
+        self.test_only = bool(config.get('test_only', False))
         ## def networks
         upsample_mode = str(config.get('generator_upsample_mode', 'resize')).lower()
         self.netG_A2B = Generator(config['input_nc'], config['output_nc'], upsample_mode=upsample_mode).cuda()
@@ -190,19 +191,34 @@ class Cyc_Trainer():
                 persistent_workers=self._dl_persistent,
                 prefetch_factor=max(1, self._dl_prefetch),
             )
-        self.train_data = DataLoader(
-            ImageDataset(
-                config['dataroot'], level,
-                transforms_1=transforms_1, transforms_2=transforms_2, unaligned=False,
-                rd_input_type=self.rd_input_type,
-                rd_mask_dir=self.rd_mask_dir,
-                rd_weights_dir=self.rd_weights_dir,
-                rd_w_min=self.rd_w_min,
-                cache_mode=config.get('cache_mode', 'mmap'),  # ← 新增
-                rd_cache_weights=config.get('rd_cache_weights', False),
-            ),
-            **dl_kwargs
-        )
+        domain_a_dir = config.get('domain_a_dir')
+        domain_b_dir = config.get('domain_b_dir')
+        val_domain_a_dir = config.get('val_domain_a_dir', domain_a_dir)
+        val_domain_b_dir = config.get('val_domain_b_dir', domain_b_dir)
+        domain_a_channels = config.get('domain_a_channels', config.get('input_nc'))
+        domain_b_channels = config.get('domain_b_channels', config.get('output_nc'))
+        self.rd_fallback_mode = str(config.get('rd_fallback_mode', 'body')).lower()
+
+        self.train_data = None
+        if not self.test_only:
+            self.train_data = DataLoader(
+                ImageDataset(
+                    config['dataroot'], level,
+                    transforms_1=transforms_1, transforms_2=transforms_2, unaligned=False,
+                    rd_input_type=self.rd_input_type,
+                    rd_mask_dir=self.rd_mask_dir,
+                    rd_weights_dir=self.rd_weights_dir,
+                    rd_w_min=self.rd_w_min,
+                    cache_mode=config.get('cache_mode', 'mmap'),  # ← 新增
+                    rd_cache_weights=config.get('rd_cache_weights', False),
+                    domain_a_dir=domain_a_dir,
+                    domain_b_dir=domain_b_dir,
+                    domain_a_channels=domain_a_channels,
+                    domain_b_channels=domain_b_channels,
+                    rd_fallback_mode=self.rd_fallback_mode,
+                ),
+                **dl_kwargs
+            )
 
         val_transforms = [ToTensor(),
                           last_tf]
@@ -230,6 +246,11 @@ class Cyc_Trainer():
                 rd_w_min=self.rd_w_min,
                 cache_mode=config.get('cache_mode', 'mmap'),  # ← 新增
                 rd_cache_weights=config.get('rd_cache_weights', False),
+                domain_a_dir=val_domain_a_dir,
+                domain_b_dir=val_domain_b_dir,
+                domain_a_channels=domain_a_channels,
+                domain_b_channels=domain_b_channels,
+                rd_fallback_mode=self.rd_fallback_mode,
             ),
             **vdl_kwargs
         )
@@ -277,7 +298,7 @@ class Cyc_Trainer():
                             if isinstance(scan_limit, int) and scan_limit > 0 and i >= scan_limit:
                                 break
                         return count
-                tr_cnt = _count_with_progress(self.train_data.dataset, 'train') if hasattr(self, 'train_data') and hasattr(self.train_data, 'dataset') else 0
+                tr_cnt = _count_with_progress(self.train_data.dataset, 'train') if self.train_data is not None and hasattr(self.train_data, 'dataset') else 0
                 va_cnt = _count_with_progress(self.val_data.dataset, 'val') if hasattr(self, 'val_data') and hasattr(self.val_data, 'dataset') else 0
                 # Add a concise one-line summary after bars finish
                 print(f"[init] mask/weight presence → train: {tr_cnt} / {len(self.train_data.dataset) if hasattr(self.train_data, 'dataset') else '?'} | val: {va_cnt} / {len(self.val_data.dataset) if hasattr(self.val_data, 'dataset') else '?'} (limit={scan_limit if scan_limit>0 else 'all'})")
@@ -1317,9 +1338,9 @@ class Cyc_Trainer():
         if save_residuals:
             os.makedirs(residual_save_root, exist_ok=True)
         # --- Save directories for RD artifacts (for training Scheme B) ---
-        rd_seeds_dir = self.config.get('rd_seeds_dir', os.path.join(self.config['image_save'], 'rd_seeds'))
-        rd_masks_dir = self.config.get('rd_masks_dir', os.path.join(self.config['image_save'], 'rd_masks'))
-        rd_weights_dir = self.config.get('rd_weights_dir', os.path.join(self.config['image_save'], 'rd_weights'))
+        rd_seeds_dir = self.config.get('rd_seeds_dir') or os.path.join(self.config['image_save'], 'rd_seeds')
+        rd_masks_dir = self.config.get('rd_masks_dir') or os.path.join(self.config['image_save'], 'rd_masks')
+        rd_weights_dir = self.config.get('rd_weights_dir') or os.path.join(self.config['image_save'], 'rd_weights')
         os.makedirs(rd_seeds_dir, exist_ok=True)
         os.makedirs(rd_masks_dir, exist_ok=True)
         os.makedirs(rd_weights_dir, exist_ok=True)
@@ -1346,6 +1367,27 @@ class Cyc_Trainer():
         save_composite = bool(self.config.get('save_composite', True))  # master switch to save composite figures
         plot_every_n = int(self.config.get('plot_every_n', 1))  # save 1 of every N slices (1 = all)
         plot_workers = int(self.config.get('test_plot_workers', 0))
+
+        # Optional test-time FID/LPIPS
+        fid_metric = None
+        lpips_metric = None
+        if bool(self.config.get('test_enable_fid', False)) and FrechetInceptionDistance is not None:
+            try:
+                fid_feat = int(self.config.get('test_fid_feature', 64))
+                fid_metric = FrechetInceptionDistance(feature=fid_feat).to(self.device)
+                fid_metric.reset()
+            except Exception as exc:
+                print(f"[test][warn] FID metric init failed: {exc}")
+                fid_metric = None
+        if bool(self.config.get('test_enable_lpips', False)) and LearnedPerceptualImagePatchSimilarity is not None:
+            try:
+                lpips_net = str(self.config.get('test_lpips_net', 'vgg'))
+                lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type=lpips_net, normalize=True).to(self.device)
+                lpips_metric._sum = 0.0
+                lpips_metric._count = 0.0
+            except Exception as exc:
+                print(f"[test][warn] LPIPS metric init failed: {exc}")
+                lpips_metric = None
 
         # Whether to use RD masks/weights for metrics during test (foreground minus misalignment area)
         test_metrics_use_rd = bool(self.config.get('test_metrics_use_rd', self.config.get('val_metrics_use_rd', self.config.get('metrics_use_rd', False))))
@@ -1518,6 +1560,26 @@ class Cyc_Trainer():
                                 fake_B_rawnp = fake_Bt.detach().cpu().numpy() if use_reg else None
                             counters['to_numpy_calls'] += 1
 
+                            # Metrics modules update (FID/LPIPS)
+                            if fid_metric is not None and _is_main_process():
+                                fake_for_metrics = self._prepare_images_for_metrics(fake_eval)
+                                real_for_metrics = self._prepare_images_for_metrics(real_Bt)
+                                try:
+                                    fid_metric.update(fake_for_metrics, real=False)
+                                    fid_metric.update(real_for_metrics, real=True)
+                                except Exception as _e:
+                                    print(f"[test][warn] FID update failed: {_e}")
+                            if lpips_metric is not None:
+                                try:
+                                    fake_lp = self._prepare_images_for_metrics(fake_eval)
+                                    real_lp = self._prepare_images_for_metrics(real_Bt)
+                                    lpips_val = lpips_metric(fake_lp, real_lp)
+                                    if lpips_val is not None:
+                                        lpips_metric._sum += float(lpips_val.sum().item())
+                                        lpips_metric._count += float(lpips_val.numel())
+                                except Exception as _e:
+                                    print(f"[test][warn] LPIPS update failed: {_e}")
+
                             for b in range(B):
                                 # Compose slice_name using patient_id and slice_id if available
                                 patient_id = patient_ids[b] if len(patient_ids) > b else None
@@ -1651,6 +1713,14 @@ class Cyc_Trainer():
 
                                     zmap = seeds = final_mask = weight_map = None
                                     if rd_enable:
+                                        # Use a single-channel residual for detection to avoid shape issues with RGB
+                                        # take channel-mean if residual/gt are multi-channel
+                                        rd_residual = residual
+                                        rd_gt = gt
+                                        if rd_residual.ndim == 3:
+                                            rd_residual = rd_residual.mean(axis=0)
+                                        if rd_gt.ndim == 3:
+                                            rd_gt = rd_gt.mean(axis=0)
                                         with _Timer('residual_detect_total', prof):
                                             q_fdr = float(self.config.get('rd_fdr_q', 0.10))
                                             Tl_fix = float(self.config.get('rd_Tl', 1.5))
@@ -1669,8 +1739,8 @@ class Cyc_Trainer():
                                             K_hard = int(self.config.get('rd_min_highz_pixels',
                                                                          5))  # minimum count of hard-evidence pixels per component
 
-                                            body = (gt != -1)
-                                            zmap = robust_zscore(residual, mask=body)
+                                            body = (rd_gt != -1)
+                                            zmap = robust_zscore(rd_residual, mask=body)
                                             absz = np.abs(zmap)
                                             # 两侧检验
                                             # --- Precompute body area for seed post-filtering ---
@@ -1861,12 +1931,16 @@ class Cyc_Trainer():
                                         counters['plot_enqueued'] = counters.get('plot_enqueued', 0) + 1
 
                                     pred_img = ((pred + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+                                    if pred_img.ndim == 3 and pred_img.shape[0] in (1, 3):
+                                        pred_img = np.transpose(pred_img, (1, 2, 0)) if pred_img.shape[0] == 3 else pred_img[0]
                                     pred_only_path = os.path.join(pred_save_root, f"{slice_name}.png")
                                     with _Timer('save_pred_png', prof):
                                         cv2.imwrite(pred_only_path, pred_img)
                                     counters['save_pred_png'] += 1
                                     if use_reg:
                                         pred_pre_img = ((fr + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+                                        if pred_pre_img.ndim == 3 and pred_pre_img.shape[0] in (1, 3):
+                                            pred_pre_img = np.transpose(pred_pre_img, (1, 2, 0)) if pred_pre_img.shape[0] == 3 else pred_pre_img[0]
                                         pred_only_pre_path = os.path.join(pred_save_root, f"{slice_name}_preReg.png")
                                         with _Timer('save_pred_pre_png', prof):
                                             cv2.imwrite(pred_only_pre_path, pred_pre_img)
@@ -2011,6 +2085,18 @@ class Cyc_Trainer():
             print('MAE (mean over all MC×slices):', avg_mae)
             print('PSNR (mean over all MC×slices):', avg_psnr)
             print('SSIM (mean over all MC×slices):', avg_ssim)
+            if fid_metric is not None and _is_main_process():
+                try:
+                    fid_value = float(fid_metric.compute())
+                    print(f'FID: {fid_value:.4f}')
+                except Exception as _e:
+                    print(f"[test][warn] FID compute failed: {_e}")
+            if lpips_metric is not None and getattr(lpips_metric, '_count', 0) > 0:
+                try:
+                    lpips_value = lpips_metric._sum / lpips_metric._count
+                    print(f'LPIPS: {lpips_value:.6f}')
+                except Exception as _e:
+                    print(f"[test][warn] LPIPS compute failed: {_e}")
 
     def PSNR(self, fake, real, mode: str = 'correct'):
         """

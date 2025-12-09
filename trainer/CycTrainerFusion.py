@@ -46,7 +46,7 @@ from .utils import (
     ResizeKeepRatioPad,
     norm01, robust_zscore, normal_cdf, bh_fdr_mask, hysteresis_from_seeds, morph_clean, save_gray_png,
     compose_slice_name, load_weight_or_mask_for_slice, load_weights_for_batch, masked_l1,
-    compute_mae, compute_psnr, compute_ssim, resolve_model_path
+    compute_mae, compute_psnr, compute_ssim, resolve_model_path, to_uint8_image
 )
 from .datasets import ImageDataset, ValDataset
 from .reg import Reg
@@ -157,15 +157,44 @@ class CycTrainerFusion:
             upsample_mode=str(config.get('generator_upsample_mode', 'resize')).lower(),
             share_body=bool(config.get('fusion_share_body', True)),
         ).cuda()
-        self.netD_B = Discriminator(config['input_nc']).cuda()
+        self.netD_B = Discriminator(config['output_nc']).cuda()
         self.optimizer_D_B = torch.optim.Adam(self.netD_B.parameters(), lr=config['lr'], betas=(0.5, 0.999))
         self.optimizer_G = torch.optim.Adam(self.netG_A2B.parameters(), lr=config['lr'], betas=(0.5, 0.999))
 
         if not config.get('regist', False):
             raise ValueError("CycTrainerFusion requires regist=True to operate with shared registration.")
-        self.R_A = Reg(config['size'], config['size'], config['input_nc'], config['input_nc']).cuda()
+        reg_fake_nc = int(config.get('reg_fake_nc', config.get('output_nc', config['input_nc'])))
+        reg_real_nc = int(config.get('reg_real_nc', config.get('output_nc', config['input_nc'])))
+        self.R_A = Reg(config['size'], config['size'], reg_fake_nc, reg_real_nc).cuda()
         self.spatial_transform = Transformer_2D().cuda()
         self.optimizer_R_A = torch.optim.Adam(self.R_A.parameters(), lr=config['lr'], betas=(0.5, 0.999))
+
+        # Optional pretrained weights
+        g_pre = config.get('pretrained_g')
+        if g_pre:
+            try:
+                state = torch.load(os.path.expanduser(g_pre), map_location='cpu')
+                if isinstance(state, dict) and 'state_dict' in state:
+                    state = state['state_dict']
+                if isinstance(state, dict) and 'netG_A2B' in state:
+                    state = state['netG_A2B']
+                self._unwrap(self.netG_A2B).load_state_dict(state, strict=False)
+                print(f"[init] Loaded pretrained generator from {g_pre}")
+            except Exception as _e:
+                print(f"[init][warn] Failed to load pretrained generator '{g_pre}': {_e}")
+
+        r_pre = config.get('pretrained_r')
+        if r_pre and hasattr(self, 'R_A') and isinstance(self.R_A, torch.nn.Module):
+            try:
+                r_state = torch.load(os.path.expanduser(r_pre), map_location='cpu')
+                if isinstance(r_state, dict) and 'state_dict' in r_state:
+                    r_state = r_state['state_dict']
+                if isinstance(r_state, dict) and 'R_A' in r_state:
+                    r_state = r_state['R_A']
+                self._unwrap(self.R_A).load_state_dict(r_state, strict=False)
+                print(f"[init] Loaded pretrained registration from {r_pre}")
+            except Exception as _e:
+                print(f"[init][warn] Failed to load pretrained registration '{r_pre}': {_e}")
 
         # Lossess
         self.MSE_loss = torch.nn.MSELoss()
@@ -270,6 +299,19 @@ class CycTrainerFusion:
                 persistent_workers=self._dl_persistent,
                 prefetch_factor=max(1, self._dl_prefetch),
             )
+        domain_a_dir = config.get('domain_a_dir')
+        domain_b_dir = config.get('domain_b_dir')
+        val_domain_a_dir = config.get('val_domain_a_dir', domain_a_dir)
+        val_domain_b_dir = config.get('val_domain_b_dir', domain_b_dir)
+        domain_a_channels = config.get('domain_a_channels', config.get('input_nc'))
+        domain_b_channels = config.get('domain_b_channels', config.get('output_nc'))
+        self._cv_train_subdir = config.get('cv_train_subdir', 'train')
+        self._cv_val_subdir = config.get('cv_val_subdir', 'val')
+        self._cv_domain_a_subdir = config.get('cv_domain_a_subdir', 'A')
+        self._cv_domain_b_subdir = config.get('cv_domain_b_subdir', 'B')
+
+        self.rd_fallback_mode = str(config.get('rd_fallback_mode', 'body')).lower()
+
         train_dataset = ImageDataset(
             config['dataroot'], level,
             transforms_1=transforms_1, transforms_2=transforms_2, unaligned=False,
@@ -279,6 +321,11 @@ class CycTrainerFusion:
             rd_w_min=self.rd_w_min,
             cache_mode=config.get('cache_mode', 'mmap'),
             rd_cache_weights=config.get('rd_cache_weights', False),
+            domain_a_dir=domain_a_dir,
+            domain_b_dir=domain_b_dir,
+            domain_a_channels=domain_a_channels,
+            domain_b_channels=domain_b_channels,
+            rd_fallback_mode=self.rd_fallback_mode,
         )
         self.train_data = DataLoader(train_dataset, **dl_kwargs)
 
@@ -308,9 +355,12 @@ class CycTrainerFusion:
                 continue
             if len(self.fold_val_loaders) >= self.n_heads:
                 break
-            val_dir = fold_dir / 'val'
-            if not val_dir.is_dir():
+            train_dir = fold_dir / self._cv_train_subdir
+            val_dir = fold_dir / self._cv_val_subdir
+            if not train_dir.is_dir() or not val_dir.is_dir():
                 continue
+            fold_val_a_dir = str((val_dir / self._cv_domain_a_subdir).resolve())
+            fold_val_b_dir = str((val_dir / self._cv_domain_b_subdir).resolve())
             val_dataset = ValDataset(
                 str(val_dir),
                 transforms_=[ToTensor(), last_tf],
@@ -321,6 +371,11 @@ class CycTrainerFusion:
                 rd_w_min=self.rd_w_min,
                 cache_mode=config.get('cache_mode', 'mmap'),
                 rd_cache_weights=config.get('rd_cache_weights', False),
+                domain_a_dir=fold_val_a_dir,
+                domain_b_dir=fold_val_b_dir,
+                domain_a_channels=domain_a_channels,
+                domain_b_channels=domain_b_channels,
+                rd_fallback_mode=self.rd_fallback_mode,
             )
             head_idx = len(self.fold_val_loaders)
             self.fold_val_datasets[head_idx] = val_dataset
@@ -329,7 +384,7 @@ class CycTrainerFusion:
             self._head_to_fold_dir[head_idx] = val_dir
             self._fold_id_lookup[fold_raw_id] = head_idx
             val_patients: Set[str] = set()
-            val_b_dir = val_dir / 'B'
+            val_b_dir = val_dir / self._cv_domain_b_subdir
             if val_b_dir.is_dir():
                 for file_path in val_b_dir.iterdir():
                     pid = self._extract_patient_id(file_path.name)
@@ -735,14 +790,23 @@ class CycTrainerFusion:
                         mask = None
                         if self.val_metrics_use_rd:
                             mask = (gt != -1).astype(np.float32)
+                            if mask.ndim == 3:
+                                mask = mask.all(axis=0).astype(np.float32)
                             if w_batch is not None:
                                 w2d = np.squeeze(w_batch[b]).astype(np.float32)
+                                if w2d.ndim == 3:
+                                    if w2d.shape[0] == 1:
+                                        w2d = w2d[0]
+                                    else:
+                                        w2d = np.mean(w2d, axis=0)
                                 if w2d.shape != gt.shape:
                                     w2d = cv2.resize(w2d, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_NEAREST)
                                 w2d = np.clip(w2d, 0.0, 1.0)
                                 mask = mask * w2d
                             if mask.sum() <= 0:
                                 mask = (gt != -1).astype(np.float32)
+                                if mask.ndim == 3:
+                                    mask = mask.all(axis=0).astype(np.float32)
                         slice_name = compose_slice_name(batch, batch_idx, b)
                         if self.val_keep_masks_dir and mask is not None:
                             _save_val_keep_mask(slice_name, mask)
@@ -752,10 +816,15 @@ class CycTrainerFusion:
 
                         if residuals_store:
                             body = (gt != -1).astype(np.float32)
+                            if body.ndim == 3:
+                                body = body.all(axis=0).astype(np.float32)
                             entry = {'fold': fold_id, 'body': body, 'residuals': {}}
                             for head in heads_all:
                                 arr = aligned[head][b].detach().cpu().numpy()
-                                entry['residuals'][head] = np.abs(np.squeeze(arr) - gt)
+                                res = np.abs(np.squeeze(arr) - gt)
+                                if res.ndim == 3:
+                                    res = res.mean(axis=0)
+                                entry['residuals'][head] = res
                             residual_cache[slice_name] = entry
 
                     mae_sum += batch_mae
@@ -1322,7 +1391,7 @@ class CycTrainerFusion:
                             torch.save(r_state, os.path.join(save_root, 'R_A.pth'))
 
                 #############val###############
-                if epoch % self.config['val_freq'] == 0:
+                if (epoch + 1) % self.config['val_freq'] == 0:
                     if _is_main_process() and self.config.get('val_debug_log', False):
                         print("[val-debug] validation start", flush=True)
                     was_train_G = self.netG_A2B.training
@@ -1390,26 +1459,12 @@ class CycTrainerFusion:
                                                 rb = real_Bv[idx].detach().cpu().numpy().squeeze()
                                                 pb = pred_Bv[idx].detach().cpu().numpy().squeeze()
 
-                                                def _to_uint8(a):
-                                                    a = np.squeeze(a)
-                                                    if a.ndim != 2:
-                                                        a = a.astype(np.float32)
-                                                        a = a[0] if a.ndim == 3 else a
-                                                    amin, amax = float(np.min(a)), float(np.max(a))
-                                                    if amin >= -1.001 and amax <= 1.001:
-                                                        a = ((a + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-                                                    else:
-                                                        a = ((a - amin) / (amax - amin + 1e-6) * 255.0).clip(0,
-                                                                                                             255).astype(
-                                                            np.uint8)
-                                                    return a
-
-                                                imgs_input.append(wandb.Image(_to_uint8(Ab)))
-                                                imgs_real.append(wandb.Image(_to_uint8(rb)))
+                                                imgs_input.append(wandb.Image(to_uint8_image(Ab)))
+                                                imgs_real.append(wandb.Image(to_uint8_image(rb)))
                                                 imgs_pred.append(
-                                                    wandb.Image(_to_uint8(pb), caption=f"head {fold_id} reg"))
+                                                    wandb.Image(to_uint8_image(pb), caption=f"head {fold_id} reg"))
                                                 imgs_pred_pre.append(wandb.Image(
-                                                    _to_uint8(pred_pre[idx].detach().cpu().numpy().squeeze()),
+                                                    to_uint8_image(pred_pre[idx].detach().cpu().numpy().squeeze()),
                                                     caption=f"head {fold_id} pre"))
                                                 collected += 1
                                             if collected >= per_head_limit:
@@ -1551,7 +1606,10 @@ class CycTrainerFusion:
                                     body_arr = np.squeeze(B_np)
                                     if body_arr.ndim == 3 and body_arr.shape[0] == 1:
                                         body_arr = body_arr[0]
-                                    body_mask = (body_arr != -1).astype(np.uint8)
+                                    if body_arr.ndim == 3 and body_arr.shape[0] > 1:
+                                        body_mask = (body_arr != -1).all(axis=0).astype(np.uint8)
+                                    else:
+                                        body_mask = (body_arr != -1).astype(np.uint8)
 
                                     # Optional RD weight preview (grayscale 0..255)
                                     W_img = None
@@ -1565,8 +1623,11 @@ class CycTrainerFusion:
                                                 if isinstance(w, torch.Tensor):
                                                     w = w.detach().cpu().numpy()
                                                 w = np.squeeze(w)
-                                                if w.ndim == 3 and w.shape[0] == 1:
-                                                    w = w[0]
+                                                if w.ndim == 3:
+                                                    if w.shape[0] == 1:
+                                                        w = w[0]
+                                                    else:
+                                                        w = np.mean(w, axis=0)
                                                 keep_array = np.clip(w.astype(np.float32), 0.0, 1.0)
                                                 w_min, w_max = float(np.min(keep_array)), float(np.max(keep_array))
                                                 if w_max > w_min:
@@ -1624,6 +1685,11 @@ class CycTrainerFusion:
                                     try:
                                         body_img = wandb.Image((body_mask * 255).astype(np.uint8), caption="body")
                                         if keep_array is not None:
+                                            if keep_array.ndim == 3:
+                                                if keep_array.shape[0] == 1:
+                                                    keep_array = keep_array[0]
+                                                else:
+                                                    keep_array = np.mean(keep_array, axis=0)
                                             if keep_array.shape != body_mask.shape:
                                                 try:
                                                     keep_array = cv2.resize(
@@ -1642,24 +1708,11 @@ class CycTrainerFusion:
                                         keep_img = None
 
                                     # Convert to uint8
-                                    def _to_uint8(a):
-                                        a = np.squeeze(a)
-                                        if a.ndim != 2:
-                                            a = a.astype(np.float32)
-                                            a = a[0] if a.ndim == 3 else a
-                                        amin, amax = float(np.min(a)), float(np.max(a))
-                                        if amin >= -1.001 and amax <= 1.001:
-                                            a = ((a + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-                                        else:
-                                            a = ((a - amin) / (amax - amin + 1e-6) * 255.0).clip(0, 255).astype(
-                                                np.uint8)
-                                        return a
-
                                     tbl.add_data(
                                         sid_str,
-                                        wandb.Image(_to_uint8(A_np), caption=f"{sid_str}: input"),
-                                        wandb.Image(_to_uint8(B_np), caption=f"{sid_str}: truth"),
-                                        wandb.Image(_to_uint8(P_np), caption=f"{sid_str}: head {fold_id} pred"),
+                                        wandb.Image(to_uint8_image(A_np), caption=f"{sid_str}: input"),
+                                        wandb.Image(to_uint8_image(B_np), caption=f"{sid_str}: truth"),
+                                        wandb.Image(to_uint8_image(P_np), caption=f"{sid_str}: head {fold_id} pred"),
                                         W_img,
                                         keep_img,
                                         body_img,
@@ -2608,8 +2661,9 @@ class CycTrainerFusion:
         if hasattr(self, 'train_data') and hasattr(self.train_data, 'dataset') and hasattr(self.train_data.dataset,
                                                                                            'set_rd_config'):
             self.train_data.dataset.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir,
-                                                  self.rd_w_min)
+                                                  self.rd_w_min, self.rd_fallback_mode)
         if hasattr(self, 'fold_val_datasets'):
             for ds in self.fold_val_datasets.values():
                 if hasattr(ds, 'set_rd_config'):
-                    ds.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir, self.rd_w_min)
+                    ds.set_rd_config(self.rd_input_type, self.rd_mask_dir, self.rd_weights_dir, self.rd_w_min,
+                                     self.rd_fallback_mode)

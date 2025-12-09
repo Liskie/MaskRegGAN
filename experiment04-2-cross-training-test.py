@@ -156,6 +156,12 @@ def load_generator(
     ) from last_err
 
 
+def _resolve_reg_channels(config: Dict) -> Tuple[int, int]:
+    fake_nc = int(config.get("reg_fake_nc", config.get("output_nc", config.get("input_nc", 1))))
+    real_nc = int(config.get("reg_real_nc", config.get("output_nc", config.get("input_nc", 1))))
+    return fake_nc, real_nc
+
+
 def load_registration(
     fold_dir: Path,
     config: Dict,
@@ -168,7 +174,8 @@ def load_registration(
     if not path.is_file():
         print(f"[warn] Registration weights missing at {path}; skipping registration.")
         return None, None
-    reg_net = Reg(config["size"], config["size"], config["input_nc"], config["input_nc"]).to(device)
+    fake_nc, real_nc = _resolve_reg_channels(config)
+    reg_net = Reg(config["size"], config["size"], fake_nc, real_nc).to(device)
     state = torch.load(path, map_location=device)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]

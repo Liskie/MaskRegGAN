@@ -301,6 +301,33 @@ def _to_vis_uint8(_a):
     return ((_a - amin) / (amax - amin + 1e-6) * 255.0).astype(_np.uint8)
 
 
+def to_uint8_image(arr):
+    """Convert a tensor/array (C,H,W) or (H,W,C) in [-1,1] or arbitrary range to uint8 for visualization."""
+    if arr is None:
+        return None
+    a = _np.asarray(arr)
+    a = _np.squeeze(a)
+    if a.ndim == 3:
+        if a.shape[0] in (1, 3):
+            if a.shape[0] == 1:
+                a = a[0]
+            else:
+                a = _np.transpose(a, (1, 2, 0))
+        elif a.shape[-1] == 1:
+            a = a[..., 0]
+    elif a.ndim > 3:
+        # best effort squeeze to 3 or fewer dims
+        while a.ndim > 3:
+            a = _np.squeeze(a, axis=0)
+    amin = float(_np.nanmin(a))
+    amax = float(_np.nanmax(a))
+    if amin >= -1.01 and amax <= 1.01:
+        a = ((a + 1.0) * 127.5).clip(0, 255)
+    else:
+        a = ((a - amin) / (amax - amin + 1e-6) * 255.0).clip(0, 255)
+    return a.astype(_np.uint8)
+
+
 def _imshow_ax(ax, img, title=None, vmin=None, vmax=None, cmap='gray'):
     if img is None:
         ax.axis('off');
@@ -331,6 +358,23 @@ def plot_composite(*, inp, gt, pred, residual, metrics, rd_data=None, uncertaint
     has_rd = rd_data is not None
     has_u = uncertainty is not None
 
+    def _to_disp(arr, force_gray=False):
+        a = np.asarray(arr)
+        a = np.squeeze(a)
+        if a.ndim == 3 and a.shape[0] in (1, 3):
+            a = np.transpose(a, (1, 2, 0))
+        if a.ndim == 3 and a.shape[2] == 1:
+            a = a[..., 0]
+        if force_gray and a.ndim == 3 and a.shape[2] == 3:
+            a = a.mean(axis=2)
+        return a
+
+    inp_v = _to_disp(inp)
+    gt_v = _to_disp(gt)
+    pred_v = _to_disp(pred)
+    residual_v = _to_disp(residual, force_gray=True)
+    overlay_v = _to_disp(overlay_rgb) if overlay_rgb is not None else None
+
     # 布局：与 CycTrainer._plot_composite 保持一致
     if has_rd:
         nrows, ncols = (2, 5) if has_u else (2, 4)
@@ -342,22 +386,22 @@ def plot_composite(*, inp, gt, pred, residual, metrics, rd_data=None, uncertaint
         axes = np.array([axes])  # 统一二维索引
 
     # 第 1 行：input / truth / pred / residual (+ colorbar)
-    axes[0, 0].imshow(_norm01(inp), cmap='gray')
+    axes[0, 0].imshow(_norm01(inp_v), cmap='gray')
     axes[0, 0].set_title('Input');
     axes[0, 0].axis('off')
 
-    axes[0, 1].imshow(_norm01(gt), cmap='gray')
+    axes[0, 1].imshow(_norm01(gt_v), cmap='gray')
     axes[0, 1].set_title('Truth');
     axes[0, 1].axis('off')
 
-    axes[0, 2].imshow(_norm01(pred), cmap='gray')
-    if overlay_rgb is not None:
-        axes[0, 2].imshow(overlay_rgb, alpha=0.3)  # 半透明叠加
+    axes[0, 2].imshow(_norm01(pred_v), cmap='gray')
+    if overlay_v is not None:
+        axes[0, 2].imshow(overlay_v, alpha=0.3)  # 半透明叠加
     axes[0, 2].set_title('Prediction');
     axes[0, 2].axis('off')
 
     # 关键改进：固定残差显示范围，跨图可比；使用发散色图
-    im_res = axes[0, 3].imshow(residual, cmap='seismic', vmin=-2.0, vmax=2.0)
+    im_res = axes[0, 3].imshow(residual_v, cmap='seismic', vmin=-2.0, vmax=2.0)
     axes[0, 3].set_title('Residual (Pred - Truth)');
     axes[0, 3].axis('off')
 
@@ -374,27 +418,30 @@ def plot_composite(*, inp, gt, pred, residual, metrics, rd_data=None, uncertaint
     # 第 2 行（若有）
     if nrows == 2:
         if has_rd:
-            zmap = rd_data.get('zmap', None)
-            seeds = rd_data.get('seeds', None)
-            final_mask = rd_data.get('final_mask', None)
-            weight_map = rd_data.get('weight_map', None)
+            zmap = _to_disp(rd_data.get('zmap', None), force_gray=True) if rd_data.get('zmap', None) is not None else None
+            seeds = _to_disp(rd_data.get('seeds', None), force_gray=True) if rd_data.get('seeds', None) is not None else None
+            final_mask = _to_disp(rd_data.get('final_mask', None), force_gray=True) if rd_data.get(
+                'final_mask', None) is not None else None
+            weight_map = _to_disp(rd_data.get('weight_map', None), force_gray=True) if rd_data.get(
+                'weight_map', None) is not None else None
             q_fdr = rd_data.get('q_fdr', 0.10)
 
-            z_vis = _norm01(zmap) if zmap is not None else np.zeros_like(pred)
+            z_vis = _norm01(zmap) if zmap is not None else np.zeros_like(residual_v)
             axes[1, 0].imshow(z_vis, cmap='magma')
             axes[1, 0].set_title('z-map (robust)');
             axes[1, 0].axis('off')
 
-            axes[1, 1].imshow((seeds.astype(np.uint8) if seeds is not None else np.zeros_like(pred)), cmap='gray')
+            axes[1, 1].imshow((seeds.astype(np.uint8) if seeds is not None else np.zeros_like(residual_v)),
+                              cmap='gray')
             axes[1, 1].set_title(f'FDR seeds (two-sided, q={q_fdr})');
             axes[1, 1].axis('off')
 
-            axes[1, 2].imshow((final_mask.astype(np.uint8) if final_mask is not None else np.zeros_like(pred)),
+            axes[1, 2].imshow((final_mask.astype(np.uint8) if final_mask is not None else np.zeros_like(residual_v)),
                               cmap='gray')
             axes[1, 2].set_title('mask (connected)');
             axes[1, 2].axis('off')
 
-            w_vis = weight_map if (weight_map is not None and np.max(weight_map) > 0) else np.zeros_like(pred,
+            w_vis = weight_map if (weight_map is not None and np.max(weight_map) > 0) else np.zeros_like(residual_v,
                                                                                                          dtype=np.float32)
             if np.max(w_vis) > 0:
                 w_vis = w_vis / (np.max(w_vis) + 1e-6)
@@ -403,8 +450,9 @@ def plot_composite(*, inp, gt, pred, residual, metrics, rd_data=None, uncertaint
             axes[1, 3].axis('off')
 
             if has_u:
-                u_vis = uncertainty / (uncertainty.max() + 1e-8) if float(np.max(uncertainty)) > 0 else np.zeros_like(
-                    pred)
+                u_v = _to_disp(uncertainty, force_gray=True) if uncertainty is not None else None
+                u_vis = u_v / (u_v.max() + 1e-8) if (u_v is not None and float(np.max(u_v)) > 0) else np.zeros_like(
+                    residual_v)
                 axes[1, 4].imshow(u_vis, cmap='inferno')
                 axes[1, 4].set_title('uncertainty (std)');
                 axes[1, 4].axis('off')
@@ -417,8 +465,9 @@ def plot_composite(*, inp, gt, pred, residual, metrics, rd_data=None, uncertaint
         else:
             # 没有 RD：若有不确定度则在 [1,0] 显示
             if has_u:
-                u_vis = uncertainty / (uncertainty.max() + 1e-8) if float(np.max(uncertainty)) > 0 else np.zeros_like(
-                    pred)
+                u_v = _to_disp(uncertainty, force_gray=True) if uncertainty is not None else None
+                u_vis = u_v / (u_v.max() + 1e-8) if (u_v is not None and float(np.max(u_v)) > 0) else np.zeros_like(
+                    residual_v)
                 axes[1, 0].imshow(u_vis, cmap='inferno')
                 axes[1, 0].set_title('uncertainty (std)');
                 axes[1, 0].axis('off')
@@ -630,8 +679,16 @@ def load_weight_or_mask_for_slice(slice_name: str, target_2d: np.ndarray,
         return body
 
     arr = np.asarray(arr).squeeze()
+    if arr.ndim == 3:
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        elif arr.shape[0] == 3:
+            arr = arr.mean(axis=0)
+        elif arr.shape[-1] == 1:
+            arr = arr[..., 0]
+        elif arr.shape[-1] == 3:
+            arr = arr.mean(axis=-1)
     if arr.shape != (H, W):
-        print(f'Mask shape mismatch: {arr.shape}, should be {(H, W)}') # DEBUG
         try:
             arr = _cv2.resize(arr.astype(np.float32), (W, H), interpolation=_cv2.INTER_NEAREST)
         except Exception:
@@ -720,6 +777,34 @@ def _squeeze_to_image(arr):
     return a.astype(np.float64)
 
 
+def _prepare_for_ssim(arr):
+    a = np.asarray(arr)
+    channel_axis = None
+    if a.ndim == 3:
+        if a.shape[0] in (1, 3):
+            if a.shape[0] == 1:
+                a = a[0]
+            else:
+                a = np.transpose(a, (1, 2, 0))
+                channel_axis = -1
+        elif a.shape[-1] in (1, 3):
+            if a.shape[-1] == 1:
+                a = a[..., 0]
+            else:
+                channel_axis = -1
+        else:
+            # fallback: squeeze if possible
+            squeezed = np.squeeze(a)
+            if squeezed.ndim == 2:
+                a = squeezed
+            else:
+                raise ValueError(f"Unsupported array shape for SSIM: {a.shape}")
+    elif a.ndim > 3:
+        a = np.squeeze(a)
+        return _prepare_for_ssim(a)
+    return a.astype(np.float64, copy=False), channel_axis
+
+
 def _build_metric_weights(target, mask=None, background_val=-1.0, eps=1e-6):
     tgt = _squeeze_to_image(target)
     body = (tgt != background_val).astype(np.float64)
@@ -760,6 +845,21 @@ def _windowed_fraction_map(base_mask, body_mask, win_size):
     body = np.asarray(body_mask, dtype=np.float64)
     if base.shape != body.shape:
         base = np.broadcast_to(base, body.shape)
+    # If a channel dimension is present, collapse it, handling both CHW and HWC layouts.
+    if base.ndim == 3:
+        if base.shape[0] in (1, 3) and base.shape[-1] not in (1, 3):
+            base = base.mean(axis=0)  # CHW -> HW
+        elif base.shape[-1] in (1, 3):
+            base = base.mean(axis=-1)  # HWC -> HW
+        else:
+            base = base.mean(axis=0)
+    if body.ndim == 3:
+        if body.shape[0] in (1, 3) and body.shape[-1] not in (1, 3):
+            body = body.mean(axis=0)
+        elif body.shape[-1] in (1, 3):
+            body = body.mean(axis=-1)
+        else:
+            body = body.mean(axis=0)
     if win_size <= 1:
         cov = base
     else:
@@ -799,17 +899,27 @@ def compute_psnr(pred, target, mask=None, background_val=-1.0, eps=1e-6):
 
 def compute_ssim(pred, target, mask=None, background_val=-1.0, eps=1e-6):
     """SSIM averaged over masked region (background excluded by default)."""
-    fake = _squeeze_to_image(pred)
-    real = _squeeze_to_image(target)
+    fake_raw, channel_axis = _prepare_for_ssim(pred)
+    real_raw, _ = _prepare_for_ssim(target)
+    fake = fake_raw if channel_axis is None else fake_raw
+    real = real_raw if channel_axis is None else real_raw
+    if channel_axis is not None and channel_axis != -1:
+        # channel axis could be at position 0 for HWC conversion; ensure final axis is channel
+        if channel_axis == 0 and fake.ndim == 3:
+            fake = np.transpose(fake, (1, 2, 0))
+            real = np.transpose(real, (1, 2, 0))
+            channel_axis = -1
     weights, weight_sum = _build_metric_weights(real, mask, background_val, eps)
     body = (real != background_val).astype(np.float64)
     base_mask = weights if weights is not None else body
     try:
-        ssim_val, ssim_map = structural_similarity(fake, real, data_range=2.0, full=True)
+        ssim_val, ssim_map = structural_similarity(fake, real, data_range=2.0, full=True,
+                                                   channel_axis=(None if fake.ndim == 2 else -1))
     except Exception:
         ssim_val, ssim_map = structural_similarity(fake.astype(np.float64),
                                                    real.astype(np.float64),
-                                                   data_range=2.0, full=True)
+                                                   data_range=2.0, full=True,
+                                                   channel_axis=(None if fake.ndim == 2 else -1))
     ssim_map = _squeeze_to_image(ssim_map)
     if ssim_map.shape != real.shape:
         try:
@@ -818,6 +928,17 @@ def compute_ssim(pred, target, mask=None, background_val=-1.0, eps=1e-6):
             raise ValueError(f"SSIM map shape {ssim_map.shape} mismatches target {real.shape}")
     win_size = _ssim_effective_window_size(real.shape)
     coverage = _windowed_fraction_map(base_mask, body, win_size)
+    # Align coverage shape to SSIM map for weighted averaging
+    if coverage.ndim != ssim_map.ndim:
+        try:
+            coverage = np.broadcast_to(coverage, ssim_map.shape)
+        except ValueError:
+            # Last resort: average SSIM map channels if present
+            if ssim_map.ndim == 3 and ssim_map.shape[-1] in (1, 3):
+                ssim_map = ssim_map.mean(axis=-1)
+                coverage = np.broadcast_to(coverage, ssim_map.shape)
+            else:
+                raise ValueError(f"Cannot broadcast coverage {coverage.shape} to SSIM map {ssim_map.shape}")
     coverage_sum = float(np.sum(coverage))
     if coverage_sum <= eps:
         if weights is not None and weight_sum > eps:
