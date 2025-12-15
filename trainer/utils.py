@@ -55,6 +55,34 @@ def tensor2image(tensor):
     return image1.astype(np.uint8)
 
 
+def smooth_weight_map_tv(weights: np.ndarray, strength: float = 0.2, n_iters: int = 15,
+                         mask: np.ndarray = None) -> np.ndarray:
+    """
+    Lightweight TV-like smoothing for 2D weight maps to suppress speckle.
+    Args:
+        weights: 2D array in [0,1].
+        strength: step size for the diffusion (>=0). Higher → stronger smoothing.
+        n_iters: number of iterations.
+        mask: optional binary mask to preserve background (e.g., body region); if given,
+              smoothing is confined to masked pixels.
+    """
+    w = np.array(weights, dtype=np.float32, copy=True)
+    if mask is not None:
+        w = w * mask.astype(np.float32)
+    strength = float(max(strength, 0.0))
+    if strength <= 0.0 or n_iters <= 0:
+        return np.clip(w, 0.0, 1.0)
+    for _ in range(int(n_iters)):
+        # 4-neighbor Laplacian
+        lap = (-4.0 * w +
+               np.roll(w, 1, axis=0) + np.roll(w, -1, axis=0) +
+               np.roll(w, 1, axis=1) + np.roll(w, -1, axis=1))
+        w = w + strength * lap
+        if mask is not None:
+            w = w * mask
+    return np.clip(w, 0.0, 1.0)
+
+
 def resolve_model_path(config: dict, name_key: str, default_name: str) -> str:
     """Return the checkpoint path for a model, honoring overrides in the config.
 
@@ -641,12 +669,16 @@ def compose_slice_name(batch, batch_index: int, b: int) -> str:
 
 
 def load_weight_or_mask_for_slice(slice_name: str, target_2d: np.ndarray,
-                                  rd_input_type: str, rd_mask_dir: str, rd_weights_dir: str, rd_w_min: float):
+                                  rd_input_type: str, rd_mask_dir: str, rd_weights_dir: str, rd_w_min: float,
+                                  ignore_background: bool = False):
     """
     Stateless loader for per-slice guidance as a weight map (float32, [0,1]).
     """
     H, W = int(target_2d.shape[-2]), int(target_2d.shape[-1])
-    body = (target_2d != -1).astype(np.float32)
+    if ignore_background:
+        body = np.ones((H, W), dtype=np.float32)
+    else:
+        body = (target_2d != -1).astype(np.float32)
 
     # Choose source directory
     if rd_input_type == 'weights':
@@ -727,7 +759,8 @@ def rd_file_exists_for_slice(slice_name: str, rd_input_type: str, rd_mask_dir: s
     return os.path.exists(base + '.npy') or os.path.exists(base + '.png')
 
 def load_weights_for_batch(batch, batch_index: int, target_B: torch.Tensor,
-                           rd_input_type: str, rd_mask_dir: str, rd_weights_dir: str, rd_w_min: float):
+                           rd_input_type: str, rd_mask_dir: str, rd_weights_dir: str, rd_w_min: float,
+                           ignore_background: bool = False):
     """Build a (B,1,H,W) weight tensor for current batch based on rd_* settings."""
     target_np = target_B.detach().cpu().numpy()
     if target_np.ndim == 4 and target_np.shape[1] == 1:
@@ -740,8 +773,10 @@ def load_weights_for_batch(batch, batch_index: int, target_B: torch.Tensor,
     weights = []
     for b in range(B):
         slice_name = compose_slice_name(batch, batch_index, b)
-        w2d = load_weight_or_mask_for_slice(slice_name, target_np_2d[b], rd_input_type, rd_mask_dir, rd_weights_dir,
-                                            rd_w_min)
+        w2d = load_weight_or_mask_for_slice(
+            slice_name, target_np_2d[b], rd_input_type, rd_mask_dir, rd_weights_dir, rd_w_min,
+            ignore_background=ignore_background
+        )
         weights.append(w2d)
     Wst = np.stack(weights, axis=0)[:, None, ...]  # (B,1,H,W)
     return torch.from_numpy(Wst).to(target_B.device, dtype=target_B.dtype)

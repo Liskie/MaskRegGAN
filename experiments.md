@@ -81,7 +81,7 @@ python experiment01-deform-field.py \
   --spacing-mm 0 0 \
   --envelope rss \
   --out_dir 'experiment-results/01-deform-field/CycleGAN_noise3/NC+R/df_eval/'
-  
+
 python experiment01-deform-field.py \
   --config 'yaml/CycleGAN-noise3-NC+R(RegGAN).yaml' \
   --levels 3 \
@@ -101,7 +101,6 @@ python experiment01-deform-field.py \
   --envelope none \
   --out_dir 'experiment-results/01-deform-field/CycleGAN_noise3/NC+R/df_eval_noise3_T2Dconvert+yxepe/'
 
-  
 python experiment01-deform-field.py \
   --config 'yaml/CycleGAN-noise5-NC+R(RegGAN).yaml' \
   --levels 0,1,2,3,4,5 \
@@ -254,6 +253,10 @@ CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
 # Train RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body 
 ```shell
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-headsplit.yaml
+
+CUDA_VISIBLE_DEVICES=1,2,3 torchrun --standalone --nproc_per_node=3 train.py --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-headsplit.yaml
+
+python train.py --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-headsplit.yaml
 ```
 
 # Test RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body
@@ -271,11 +274,26 @@ CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
 
 # Train RegGAN on OuluCASIA NIR2VIS - Fusion mode with split from body 
 ```shell
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-OuluCASIA-Q3-fusion3.yaml
+WANDB_DEBUG=true CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-OuluCASIA-Q5-fusion3.yaml
+
+python train.py --config yaml/RegGAN-OuluCASIA-Q5-fusion3.yaml
+
+WANDB_DEBUG=true CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-OuluCASIA-All-fusion3.yaml
 ```
 
-# Test RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body
+# Test RegGAN on OuluCASIA NIR2VIS - Fusion mode with split from body
 ```shell
+
+CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
+      --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-headsplit-testOulu.yaml \
+      --weights output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit-v251209T2053-resfix/NC+R/netG_A2B.pth \
+      --reg-weights output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit-v251209T2053-resfix/NC+R/R_A.pth \
+      --data-root data/Oulu-CASIA-FE/test/all \
+      --compute-fid --fid-feature 64 \
+      --compute-lpips --lpips-net vgg \
+      --fig-dir output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit-v251209T2053-resfix/test-eval-on-OuluCASIA/figs \
+      --output output/NIRVIS-NIR2RGB-RegGAN-fusion3-headsplit-v251209T2053-resfix/test-eval-on-OuluCASIA/summary.json
+      
 CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
       --config yaml/RegGAN-OuluCASIA-Q1-fusion3.yaml \
       --weights output/OuluCASIA-Q1-RegGAN-fusion3/NC+R/netG_A2B.pth \
@@ -322,14 +340,14 @@ CUDA_VISIBLE_DEVICES=0 python experiment05-fusion-training-test.py \
       
 CUDA_VISIBLE_DEVICES=3 python experiment05-fusion-training-test.py \
       --config yaml/RegGAN-OuluCASIA-Q5-fusion3.yaml \
-      --weights output/OuluCASIA-Q5-RegGAN-fusion3/NC+R/netG_A2B.pth \
-      --reg-weights output/OuluCASIA-Q5-RegGAN-fusion3/NC+R/R_A.pth \
+      --weights output/OuluCASIA-Q5-RegGAN-fusion3-val1/NC+R/netG_A2B.pth \
+      --reg-weights output/OuluCASIA-Q5-RegGAN-fusion3-val1/NC+R/R_A.pth \
       --data-root data/Oulu-CASIA-FE/test/all \
       --compute-fid --fid-feature 64 \
       --compute-lpips --lpips-net vgg \
       --fig-workers 32 \
-      --fig-dir output/OuluCASIA-Q5-RegGAN-fusion3/test-eval/figs \
-      --output output/OuluCASIA-Q5-RegGAN-fusion3/test-eval/summary.json
+      --fig-dir output/OuluCASIA-Q5-RegGAN-fusion3-val1/test-eval/figs \
+      --output output/OuluCASIA-Q5-RegGAN-fusion3-val1/test-eval/summary.json
 ```
 
 # Basic RegGAN
@@ -393,4 +411,9 @@ python experiment06-basic-training-test.py \
     --fig-dir ./output/OuluCASIA-Q5-RegGAN-basic/test-eval/figs \
     --output ./output/OuluCASIA-Q5-RegGAN-basic/test-eval/summary.json \
     --fig-workers 4
+```
+
+# Train RegGAN on VIPL-MumoFace NIR2RGB - Fusion mode with split from body, no reg
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py --config yaml/RegGAN-NIRVIS-NIR2RGB-fusion3-noreg.yaml
 ```

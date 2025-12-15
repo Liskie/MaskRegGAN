@@ -19,7 +19,7 @@ class ImageDataset(Dataset):
                  cache_mode='none', rd_cache_weights=False,
                  domain_a_dir=None, domain_b_dir=None,
                  domain_a_channels=None, domain_b_channels=None,
-                 rd_fallback_mode='body'):
+                 rd_fallback_mode='body', ignore_neg1_background=False):
         transforms_1 = transforms_1 or []
         transforms_2 = transforms_2 or []
         self.domain_a_dir = domain_a_dir
@@ -38,6 +38,7 @@ class ImageDataset(Dataset):
         self.cache_mode = str(cache_mode).lower()
         self.rd_cache_weights = bool(rd_cache_weights)
         self.rd_fallback_mode = str(rd_fallback_mode or 'body').lower()
+        self.ignore_neg1_background = bool(ignore_neg1_background)
         # Setup caches for A/B arrays and weight maps
         self._A_cache = [None] * len(self.files_A)
         self._B_cache = [None] * len(self.files_B)
@@ -175,13 +176,15 @@ class ImageDataset(Dataset):
                 w_cached = self._W_cache.get(slice_name, None)
                 if w_cached is None:
                     w2d = load_weight_or_mask_for_slice(slice_name, tgt, self.rd_input_type, self.rd_mask_dir,
-                                                        self.rd_weights_dir, float(self.rd_w_min))
+                                                        self.rd_weights_dir, float(self.rd_w_min),
+                                                        ignore_background=self.ignore_neg1_background)
                     self._W_cache[slice_name] = w2d
                 else:
                     w2d = w_cached
             else:
                 w2d = load_weight_or_mask_for_slice(slice_name, tgt, self.rd_input_type, self.rd_mask_dir,
-                                                    self.rd_weights_dir, float(self.rd_w_min))
+                                                    self.rd_weights_dir, float(self.rd_w_min),
+                                                    ignore_background=self.ignore_neg1_background)
             rd_weight = self._apply_mask_transforms(w2d, affine_params_B, affine_conf_B)
         else:
             if self.rd_fallback_mode == 'full':
@@ -236,7 +239,10 @@ class ImageDataset(Dataset):
         return ten.float()
 
     def _build_body_mask(self, tensor, background_val=-1.0):
-        mask = (tensor != background_val).float()
+        if self.ignore_neg1_background:
+            mask = torch.ones_like(tensor, dtype=torch.float32)
+        else:
+            mask = (tensor != background_val).float()
         if mask.ndim == 3 and mask.shape[0] > 1:
             mask, _ = torch.min(mask, dim=0, keepdim=True)
         elif mask.ndim == 2:
@@ -272,13 +278,15 @@ class ImageDataset(Dataset):
                          interpolation=interp if not is_mask else InterpolationMode.NEAREST, fill=float(fill))
 
     def set_rd_config(self, rd_input_type=None, rd_mask_dir='', rd_weights_dir='', rd_w_min=0.0,
-                      rd_fallback_mode=None):
+                      rd_fallback_mode=None, ignore_neg1_background=None):
         self.rd_input_type = rd_input_type
         self.rd_mask_dir = rd_mask_dir or ''
         self.rd_weights_dir = rd_weights_dir or ''
         self.rd_w_min = float(rd_w_min)
         if rd_fallback_mode is not None:
             self.rd_fallback_mode = str(rd_fallback_mode).lower()
+        if ignore_neg1_background is not None:
+            self.ignore_neg1_background = bool(ignore_neg1_background)
         self._W_cache = {}
 
 
@@ -286,7 +294,7 @@ class ImageDataset(Dataset):
 class ValDataset(Dataset):
     def __init__(self, root, count=None, transforms_=None, unaligned=False, rd_input_type=None, rd_mask_dir='', rd_weights_dir='', rd_w_min=0.0,
                  cache_mode='none', rd_cache_weights=False, domain_a_dir=None, domain_b_dir=None,
-                 domain_a_channels=None, domain_b_channels=None, rd_fallback_mode='body'):
+                 domain_a_channels=None, domain_b_channels=None, rd_fallback_mode='body', ignore_neg1_background=False):
         transforms_ = transforms_ or []
         self._resize_op = transforms_[-1] if transforms_ else None
         if self._resize_op is None:
@@ -306,6 +314,7 @@ class ValDataset(Dataset):
         self.cache_mode = str(cache_mode).lower()
         self.rd_cache_weights = bool(rd_cache_weights)
         self.rd_fallback_mode = str(rd_fallback_mode or 'body').lower()
+        self.ignore_neg1_background = bool(ignore_neg1_background)
         self._A_cache = [None] * len(self.files_A)
         self._B_cache = [None] * len(self.files_B)
         self._W_cache = {}
@@ -416,13 +425,15 @@ class ValDataset(Dataset):
                 w_cached = self._W_cache.get(slice_name, None)
                 if w_cached is None:
                     w2d = load_weight_or_mask_for_slice(slice_name, tgt, self.rd_input_type, self.rd_mask_dir,
-                                                        self.rd_weights_dir, float(self.rd_w_min))
+                                                        self.rd_weights_dir, float(self.rd_w_min),
+                                                        ignore_background=self.ignore_neg1_background)
                     self._W_cache[slice_name] = w2d
                 else:
                     w2d = w_cached
             else:
                 w2d = load_weight_or_mask_for_slice(slice_name, tgt, self.rd_input_type, self.rd_mask_dir,
-                                                    self.rd_weights_dir, float(self.rd_w_min))
+                                                    self.rd_weights_dir, float(self.rd_w_min),
+                                                    ignore_background=self.ignore_neg1_background)
             rd_weight = torch.clamp(self._resize_op(self._ensure_tensor(w2d)), 0.0, 1.0)
 
         sample = {'A': item_A, 'B': item_B, 'patient_id': pid, 'slice_id': sid}
@@ -446,11 +457,13 @@ class ValDataset(Dataset):
         return ten.float()
 
     def set_rd_config(self, rd_input_type=None, rd_mask_dir='', rd_weights_dir='', rd_w_min=0.0,
-                      rd_fallback_mode=None):
+                      rd_fallback_mode=None, ignore_neg1_background=None):
         self.rd_input_type = rd_input_type
         self.rd_mask_dir = rd_mask_dir or ''
         self.rd_weights_dir = rd_weights_dir or ''
         self.rd_w_min = float(rd_w_min)
         if rd_fallback_mode is not None:
             self.rd_fallback_mode = str(rd_fallback_mode).lower()
+        if ignore_neg1_background is not None:
+            self.ignore_neg1_background = bool(ignore_neg1_background)
         self._W_cache = {}
